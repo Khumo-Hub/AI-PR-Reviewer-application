@@ -88,6 +88,69 @@ def test_ai_review_endpoint(monkeypatch) -> None:
     assert response.json()["review"]["risk"] == "low"
 
 
+def test_outlook_draft_endpoint(monkeypatch) -> None:
+    class FakeGitHubService:
+        def get_pull_request_review_input(self, repository: str, number: int) -> dict:
+            return {
+                "repository": repository,
+                "pull_request": {
+                    "number": number,
+                    "title": "Example PR",
+                    "url": "https://github.com/example/repo/pull/4",
+                },
+                "diff": "diff --git a/app/main.py b/app/main.py",
+            }
+
+        def close(self) -> None:
+            pass
+
+    class FakeAIReviewService:
+        def review_pull_request(self, review_input: dict) -> AIReviewResult:
+            return AIReviewResult(
+                summary="Looks good.",
+                risk="low",
+                issues=[],
+                tests_missing=[],
+                recommendation="approve",
+            )
+
+        def close(self) -> None:
+            pass
+
+    class FakeOutlookService:
+        def create_review_draft(self, review_payload: dict) -> dict:
+            assert review_payload["review"]["recommendation"] == "approve"
+            return {
+                "id": "draft-123",
+                "subject": "PR Review",
+                "is_draft": True,
+                "web_link": "https://outlook.example/draft-123",
+                "recipient": "reviewer@example.com",
+            }
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
+    monkeypatch.setenv("REVIEW_API_KEY", "test-review-key")
+    monkeypatch.setattr("app.main.GitHubService", FakeGitHubService)
+    monkeypatch.setattr("app.main.AIReviewService", FakeAIReviewService)
+    monkeypatch.setattr("app.main.OutlookService", FakeOutlookService)
+
+    response = client.post(
+        "/reviews/Khumo-Hub/AI-PR-Reviewer-application/4/outlook-draft",
+        headers={"X-API-Key": "test-review-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["review"]["recommendation"] == "approve"
+    assert response.json()["outlook_draft"]["id"] == "draft-123"
+    assert response.json()["outlook_draft"]["is_draft"] is True
+
+
 def test_ai_review_endpoint_rejects_missing_key_before_services(monkeypatch) -> None:
     calls = {"github": 0, "ai": 0}
 
