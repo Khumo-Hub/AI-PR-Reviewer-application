@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import quote
 from typing import Any
 
 import httpx
+
+from app.microsoft_auth import MicrosoftAuthError, MicrosoftAuthService
 
 
 class OutlookServiceError(Exception):
@@ -77,26 +80,34 @@ def format_review_email(review_payload: dict[str, Any]) -> tuple[str, str]:
 class OutlookService:
     def __init__(
         self,
-        access_token: str | None = None,
+        mailbox: str | None = None,
         recipient: str | None = None,
+        auth_service: MicrosoftAuthService | None = None,
         client: httpx.Client | None = None,
         base_url: str = "https://graph.microsoft.com/v1.0",
     ) -> None:
-        self.access_token = access_token or os.getenv("MICROSOFT_GRAPH_ACCESS_TOKEN")
+        self.mailbox = mailbox or os.getenv("OUTLOOK_MAILBOX")
         self.recipient = recipient or os.getenv("OUTLOOK_REVIEW_RECIPIENT")
         self.base_url = base_url.rstrip("/")
 
-        if not self.access_token:
-            raise OutlookServiceError(503, "Microsoft Graph access token is not configured")
+        if not self.mailbox:
+            raise OutlookServiceError(503, "Outlook mailbox is not configured")
         if not self.recipient:
             raise OutlookServiceError(503, "Outlook review recipient is not configured")
 
+        self.auth_service = auth_service or MicrosoftAuthService()
         self.client = client or httpx.Client(timeout=20.0)
         self._owns_client = client is None
 
     def close(self) -> None:
         if self._owns_client:
             self.client.close()
+
+    def _access_token(self) -> str:
+        try:
+            return self.auth_service.get_access_token()
+        except MicrosoftAuthError as exc:
+            raise OutlookServiceError(exc.status_code, exc.detail) from exc
 
     def create_review_draft(self, review_payload: dict[str, Any]) -> dict[str, Any]:
         subject, body = format_review_email(review_payload)
@@ -115,11 +126,14 @@ class OutlookService:
             ],
         }
 
+        access_token = self._access_token()
+        mailbox = quote(self.mailbox, safe="@._-")
+
         try:
             response = self.client.post(
-                f"{self.base_url}/me/messages",
+                f"{self.base_url}/users/{mailbox}/messages",
                 headers={
-                    "Authorization": f"Bearer {self.access_token}",
+                    "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
                 },
                 json=message,
@@ -132,7 +146,10 @@ class OutlookService:
                 detail = "Microsoft Graph authentication failed"
                 status_code = 503
             elif response.status_code == 403:
-                detail = "Microsoft Graph Mail.ReadWrite permission is required"
+                detail = "Microsoft Graph Mail.ReadWrite application permission is required"
+                status_code = 503
+            elif response.status_code == 404:
+                detail = "Outlook mailbox was not found or is not accessible"
                 status_code = 503
             elif response.status_code == 429:
                 detail = "Microsoft Graph rate limit exceeded"
@@ -144,11 +161,16 @@ class OutlookService:
 
         try:
             data = response.json()
+            draft_id = data["id"]
+            is_draft = data["isDraft"]
+            if not draft_id or is_draft is not True:
+                raise ValueError("Invalid draft response")
             return {
-                "id": data["id"],
+                "id": draft_id,
                 "subject": data.get("subject", subject),
-                "is_draft": data.get("isDraft", True),
+                "is_draft": True,
                 "web_link": data.get("webLink"),
+                "mailbox": self.mailbox,
                 "recipient": self.recipient,
             }
         except (KeyError, TypeError, ValueError) as exc:
