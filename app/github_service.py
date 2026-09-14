@@ -19,9 +19,11 @@ class GitHubService:
         token: str | None = None,
         client: httpx.Client | None = None,
         base_url: str = "https://api.github.com",
+        max_diff_bytes: int | None = None,
     ) -> None:
         self.token = token or os.getenv("GITHUB_TOKEN")
         self.base_url = base_url.rstrip("/")
+        self.max_diff_bytes = max_diff_bytes or int(os.getenv("MAX_PR_DIFF_BYTES", "500000"))
         self.client = client or httpx.Client(timeout=15.0)
         self._owns_client = client is None
 
@@ -48,8 +50,12 @@ class GitHubService:
         if response.status_code >= 400:
             if response.status_code == 404:
                 detail = "GitHub pull request not found"
-            elif response.status_code in {401, 403}:
-                detail = "GitHub authentication or permissions failed"
+            elif response.status_code == 401:
+                detail = "GitHub authentication failed"
+            elif response.status_code == 403 and response.headers.get("X-RateLimit-Remaining") == "0":
+                detail = "GitHub API rate limit exceeded"
+            elif response.status_code == 403:
+                detail = "GitHub permissions failed"
             else:
                 detail = f"GitHub API returned status {response.status_code}"
 
@@ -84,6 +90,9 @@ class GitHubService:
     def get_pull_request_diff(self, repository: str, number: int) -> str:
         url = f"{self.base_url}/repos/{repository}/pulls/{number}"
         response = self._get(url, "application/vnd.github.v3.diff")
+        diff_bytes = response.content
+        if len(diff_bytes) > self.max_diff_bytes:
+            raise GitHubServiceError(413, "Pull request diff is too large to review")
         return response.text
 
     def get_pull_request_review_input(self, repository: str, number: int) -> dict[str, Any]:
