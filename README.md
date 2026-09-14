@@ -48,6 +48,12 @@ This endpoint retrieves the pull request from GitHub and sends the metadata and 
 
 Set `OPENAI_API_KEY` in the environment. `OPENAI_MODEL` optionally overrides the default model.
 
+Because this endpoint can trigger paid OpenAI API calls, it is protected by a service API key. Set `REVIEW_API_KEY` to a long random secret and include it on every AI review request as:
+
+`X-API-Key: <your REVIEW_API_KEY>`
+
+Requests with a missing or incorrect key are rejected before GitHub is queried or OpenAI is called. If `REVIEW_API_KEY` is not configured, the endpoint fails closed with HTTP 503.
+
 For public repositories, GitHub access can work without authentication subject to API rate limits. For private repositories or higher rate limits, set `GITHUB_TOKEN` in the environment.
 
 For security, the API is deny-by-default: only repositories listed in `ALLOWED_GITHUB_REPOSITORIES` can be fetched. Use a comma-separated list such as `Khumo-Hub/AI-PR-Reviewer-application,owner/another-repo`. Requests for repositories outside the allowlist return HTTP 403 before any GitHub API call is made.
