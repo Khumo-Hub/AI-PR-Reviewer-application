@@ -1,6 +1,7 @@
+import hmac
 import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 
 from app.ai_reviewer import AIReviewService, AIReviewerError
 from app.github_service import GitHubService, GitHubServiceError
@@ -31,6 +32,22 @@ def validate_repository(owner: str, repo: str) -> str:
     return repository
 
 
+def validate_review_api_key(api_key: str | None) -> None:
+    configured_api_key = os.getenv("REVIEW_API_KEY")
+    if not configured_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Review API key is not configured",
+        )
+
+    if api_key is None or not hmac.compare_digest(api_key, configured_api_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing review API key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     return {"message": "AI PR Reviewer is running"}
@@ -57,7 +74,14 @@ def get_pull_request(owner: str, repo: str, pr_number: int) -> dict:
 
 
 @app.post("/reviews/{owner}/{repo}/{pr_number}")
-def review_pull_request(owner: str, repo: str, pr_number: int) -> dict:
+def review_pull_request(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict:
+    validate_review_api_key(x_api_key)
+
     if pr_number < 1:
         raise HTTPException(status_code=422, detail="Pull request number must be positive")
 
