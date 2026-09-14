@@ -86,6 +86,31 @@ GitHub Actions runs the complete Pytest suite for every pull request and every p
 
 To enforce CI before merge, configure the repository's `main` branch protection or ruleset to require the `tests` status check after the workflow has run at least once.
 
+## Deployment on Render
+
+A Render Blueprint is provided in `render.yaml`. It creates a Python web service in the Frankfurt region, installs `requirements.txt`, starts FastAPI with Uvicorn, and uses `/health` for health checks.
+
+The service is configured to deploy from `main` only after CI checks pass. Secret values are declared with `sync: false`, so Render asks for them during the initial Blueprint creation rather than storing them in Git.
+
+Required deployment secrets/configuration include:
+
+- `OPENAI_API_KEY`
+- `REVIEW_API_KEY`
+- `GITHUB_WEBHOOK_SECRET`
+- `MICROSOFT_TENANT_ID`
+- `MICROSOFT_CLIENT_ID`
+- `MICROSOFT_CLIENT_SECRET`
+- `OUTLOOK_MAILBOX`
+- `OUTLOOK_REVIEW_RECIPIENT`
+
+After deployment, confirm `GET /health` returns `{"status":"ok"}` over HTTPS. Then register a GitHub repository webhook whose payload URL is:
+
+`https://<your-render-service>.onrender.com/webhooks/github`
+
+Use `application/json`, set the same `GITHUB_WEBHOOK_SECRET`, enable SSL verification, and subscribe to pull-request events.
+
+The Blueprint currently uses Render's free plan for initial testing. Free services can spin down when idle, so use an always-on paid instance before relying on the webhook for production-grade responsiveness and delivery reliability.
+
 ## Development workflow
 
 The application is developed through feature branches and pull requests rather than committing features directly to `main`.
@@ -98,4 +123,5 @@ The application is developed through feature branches and pull requests rather t
 4. Outlook email integration
 5. GitHub Actions and automated tests
 6. GitHub webhook automation
-7. Optional review dashboard
+7. Public deployment and GitHub webhook registration
+8. Optional review dashboard
