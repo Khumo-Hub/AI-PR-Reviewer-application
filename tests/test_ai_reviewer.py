@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError
 
@@ -75,7 +76,8 @@ def test_missing_openai_api_key(monkeypatch) -> None:
 
 
 def test_openai_connection_failure_maps_to_bad_gateway() -> None:
-    client = RaisingOpenAIClient(APIConnectionError(request=None))
+    request = httpx.Request("POST", "https://api.openai.test/v1/responses")
+    client = RaisingOpenAIClient(APIConnectionError(request=request))
     service = AIReviewService(client=client, model="test-model")
 
     with pytest.raises(AIReviewerError) as exc_info:
@@ -99,7 +101,8 @@ def test_openai_status_errors_are_mapped(
     expected_status: int,
     expected_detail: str,
 ) -> None:
-    response = SimpleNamespace(status_code=status_code, request=None)
+    request = httpx.Request("POST", "https://api.openai.test/v1/responses")
+    response = httpx.Response(status_code, request=request)
     error = APIStatusError(
         message="failure",
         response=response,
