@@ -22,6 +22,20 @@ When a GitHub pull request is opened or updated, the application will be able to
 - Pytest
 - GitHub Actions
 
+## Current API
+
+### Health check
+
+`GET /health`
+
+### Retrieve a GitHub pull request
+
+`GET /github/pull-requests/{owner}/{repo}/{pr_number}`
+
+The response contains structured pull-request metadata plus the unified diff that will later be passed to the AI review service.
+
+For public repositories, the endpoint can work without authentication subject to GitHub API rate limits. For private repositories or higher rate limits, set `GITHUB_TOKEN` in the environment. Copy `.env.example` as a starting point and never commit a real token.
+
 ## Development workflow
 
 The application is developed through feature branches and pull requests rather than committing features directly to `main`.
