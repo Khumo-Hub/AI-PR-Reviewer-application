@@ -68,6 +68,12 @@ For security, the API is deny-by-default: only repositories listed in `ALLOWED_G
 
 Copy `.env.example` as a starting point and never commit real credentials.
 
+## Continuous integration
+
+GitHub Actions runs the complete Pytest suite for every pull request and every push to `main` using Python 3.11. The workflow uses read-only repository permissions, pip dependency caching, a 10-minute job timeout, and a stable `tests` job name intended to be used as the required status check for protected merges.
+
+To enforce CI before merge, configure the repository's `main` branch protection or ruleset to require the `tests` status check after the workflow has run at least once.
+
 ## Development workflow
 
 The application is developed through feature branches and pull requests rather than committing features directly to `main`.
