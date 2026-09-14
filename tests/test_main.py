@@ -29,6 +29,10 @@ def test_pull_request_endpoint(monkeypatch) -> None:
         def close(self) -> None:
             pass
 
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
     monkeypatch.setattr("app.main.GitHubService", FakeGitHubService)
 
     response = client.get(
@@ -38,6 +42,28 @@ def test_pull_request_endpoint(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["repository"] == "Khumo-Hub/AI-PR-Reviewer-application"
     assert response.json()["pull_request"]["number"] == 1
+
+
+def test_repository_must_be_allowed(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
+
+    response = client.get("/github/pull-requests/other/private-repo/1")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Repository is not allowed for review"}
+
+
+def test_no_allowlist_defaults_to_deny(monkeypatch) -> None:
+    monkeypatch.delenv("ALLOWED_GITHUB_REPOSITORIES", raising=False)
+
+    response = client.get(
+        "/github/pull-requests/Khumo-Hub/AI-PR-Reviewer-application/1"
+    )
+
+    assert response.status_code == 403
 
 
 def test_pull_request_number_must_be_positive() -> None:
