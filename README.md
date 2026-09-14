@@ -34,7 +34,13 @@ When a GitHub pull request is opened or updated, the application will be able to
 
 The response contains structured pull-request metadata plus the unified diff that will later be passed to the AI review service.
 
-For public repositories, the endpoint can work without authentication subject to GitHub API rate limits. For private repositories or higher rate limits, set `GITHUB_TOKEN` in the environment. Copy `.env.example` as a starting point and never commit a real token.
+For public repositories, GitHub access can work without authentication subject to API rate limits. For private repositories or higher rate limits, set `GITHUB_TOKEN` in the environment.
+
+For security, the API is deny-by-default: only repositories listed in `ALLOWED_GITHUB_REPOSITORIES` can be fetched. Use a comma-separated list such as `Khumo-Hub/AI-PR-Reviewer-application,owner/another-repo`. Requests for repositories outside the allowlist return HTTP 403 before any GitHub API call is made.
+
+Large pull-request diffs are rejected before the AI-review stage. `MAX_PR_DIFF_BYTES` defaults to 500000 bytes and can be adjusted through the environment.
+
+Copy `.env.example` as a starting point and never commit a real token.
 
 ## Development workflow
 
