@@ -62,6 +62,18 @@ The Entra application must have Microsoft Graph `Mail.ReadWrite` **application**
 
 With app-only authentication, drafts are created via `/users/{mailbox}/messages`. The response is accepted only when Microsoft Graph returns a message ID and explicitly reports `isDraft: true`.
 
+### Receive GitHub pull-request webhooks
+
+`POST /webhooks/github`
+
+GitHub can call this endpoint when pull requests change. Configure a long random `GITHUB_WEBHOOK_SECRET` in both the application environment and the GitHub webhook settings. The service verifies the raw request body against the `X-Hub-Signature-256` header before processing the payload.
+
+The webhook responds to GitHub quickly with HTTP 202 and schedules the existing GitHub → OpenAI → Outlook draft workflow in a FastAPI background task. Automation runs for non-draft pull requests on these actions: `opened`, `reopened`, `synchronize`, and `ready_for_review`.
+
+Other GitHub event types and unsupported pull-request actions are acknowledged and ignored. Repository allowlisting still applies, and duplicate `X-GitHub-Delivery` IDs are ignored using a bounded in-memory tracker.
+
+The current in-process background task and delivery tracker are suitable for this first deployment. A later production-hardening step can move jobs and idempotency to durable infrastructure such as a queue/cache so work survives process restarts and multiple application instances.
+
 For public repositories, GitHub access can work without authentication subject to API rate limits. For private repositories or higher rate limits, set `GITHUB_TOKEN` in the environment.
 
 For security, the API is deny-by-default: only repositories listed in `ALLOWED_GITHUB_REPOSITORIES` can be fetched. Large pull-request diffs are rejected before the AI-review stage. Pull-request content is treated as untrusted data in the AI-review prompt.
