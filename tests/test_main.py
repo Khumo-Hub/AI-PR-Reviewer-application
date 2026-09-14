@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.ai_reviewer import AIReviewResult
 from app.main import app
 
 client = TestClient(app)
@@ -42,6 +43,47 @@ def test_pull_request_endpoint(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["repository"] == "Khumo-Hub/AI-PR-Reviewer-application"
     assert response.json()["pull_request"]["number"] == 1
+
+
+def test_ai_review_endpoint(monkeypatch) -> None:
+    class FakeGitHubService:
+        def get_pull_request_review_input(self, repository: str, number: int) -> dict:
+            return {
+                "repository": repository,
+                "pull_request": {"number": number, "title": "Example PR"},
+                "diff": "diff --git a/app/main.py b/app/main.py",
+            }
+
+        def close(self) -> None:
+            pass
+
+    class FakeAIReviewService:
+        def review_pull_request(self, review_input: dict) -> AIReviewResult:
+            return AIReviewResult(
+                summary="Looks good.",
+                risk="low",
+                issues=[],
+                tests_missing=[],
+                recommendation="approve",
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
+    monkeypatch.setattr("app.main.GitHubService", FakeGitHubService)
+    monkeypatch.setattr("app.main.AIReviewService", FakeAIReviewService)
+
+    response = client.post(
+        "/reviews/Khumo-Hub/AI-PR-Reviewer-application/3"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["review"]["recommendation"] == "approve"
+    assert response.json()["review"]["risk"] == "low"
 
 
 def test_repository_must_be_allowed(monkeypatch) -> None:
