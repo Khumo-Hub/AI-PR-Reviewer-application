@@ -1,13 +1,15 @@
+import hmac
 import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 
+from app.ai_reviewer import AIReviewService, AIReviewerError
 from app.github_service import GitHubService, GitHubServiceError
 
 app = FastAPI(
     title="AI PR Reviewer",
     description="AI-assisted GitHub pull-request review service.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 
@@ -18,6 +20,32 @@ def allowed_github_repositories() -> set[str]:
         for repository in configured.split(",")
         if repository.strip()
     }
+
+
+def validate_repository(owner: str, repo: str) -> str:
+    repository = f"{owner}/{repo}"
+    if repository.lower() not in allowed_github_repositories():
+        raise HTTPException(
+            status_code=403,
+            detail="Repository is not allowed for review",
+        )
+    return repository
+
+
+def validate_review_api_key(api_key: str | None) -> None:
+    configured_api_key = os.getenv("REVIEW_API_KEY")
+    if not configured_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Review API key is not configured",
+        )
+
+    if api_key is None or not hmac.compare_digest(api_key, configured_api_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing review API key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
 
 
 @app.get("/")
@@ -35,13 +63,7 @@ def get_pull_request(owner: str, repo: str, pr_number: int) -> dict:
     if pr_number < 1:
         raise HTTPException(status_code=422, detail="Pull request number must be positive")
 
-    repository = f"{owner}/{repo}"
-    if repository.lower() not in allowed_github_repositories():
-        raise HTTPException(
-            status_code=403,
-            detail="Repository is not allowed for review",
-        )
-
+    repository = validate_repository(owner, repo)
     github = GitHubService()
     try:
         return github.get_pull_request_review_input(repository, pr_number)
@@ -49,3 +71,37 @@ def get_pull_request(owner: str, repo: str, pr_number: int) -> dict:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     finally:
         github.close()
+
+
+@app.post("/reviews/{owner}/{repo}/{pr_number}")
+def review_pull_request(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict:
+    validate_review_api_key(x_api_key)
+
+    if pr_number < 1:
+        raise HTTPException(status_code=422, detail="Pull request number must be positive")
+
+    repository = validate_repository(owner, repo)
+    github = GitHubService()
+    ai = None
+    try:
+        review_input = github.get_pull_request_review_input(repository, pr_number)
+        ai = AIReviewService()
+        review = ai.review_pull_request(review_input)
+        return {
+            "repository": repository,
+            "pull_request": review_input["pull_request"],
+            "review": review.model_dump(),
+        }
+    except GitHubServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except AIReviewerError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    finally:
+        github.close()
+        if ai is not None:
+            ai.close()

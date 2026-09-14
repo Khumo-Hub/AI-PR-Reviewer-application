@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.ai_reviewer import AIReviewResult
 from app.main import app
 
 client = TestClient(app)
@@ -42,6 +43,104 @@ def test_pull_request_endpoint(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["repository"] == "Khumo-Hub/AI-PR-Reviewer-application"
     assert response.json()["pull_request"]["number"] == 1
+
+
+def test_ai_review_endpoint(monkeypatch) -> None:
+    class FakeGitHubService:
+        def get_pull_request_review_input(self, repository: str, number: int) -> dict:
+            return {
+                "repository": repository,
+                "pull_request": {"number": number, "title": "Example PR"},
+                "diff": "diff --git a/app/main.py b/app/main.py",
+            }
+
+        def close(self) -> None:
+            pass
+
+    class FakeAIReviewService:
+        def review_pull_request(self, review_input: dict) -> AIReviewResult:
+            return AIReviewResult(
+                summary="Looks good.",
+                risk="low",
+                issues=[],
+                tests_missing=[],
+                recommendation="approve",
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
+    monkeypatch.setenv("REVIEW_API_KEY", "test-review-key")
+    monkeypatch.setattr("app.main.GitHubService", FakeGitHubService)
+    monkeypatch.setattr("app.main.AIReviewService", FakeAIReviewService)
+
+    response = client.post(
+        "/reviews/Khumo-Hub/AI-PR-Reviewer-application/3",
+        headers={"X-API-Key": "test-review-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["review"]["recommendation"] == "approve"
+    assert response.json()["review"]["risk"] == "low"
+
+
+def test_ai_review_endpoint_rejects_missing_key_before_services(monkeypatch) -> None:
+    calls = {"github": 0, "ai": 0}
+
+    class FailIfGitHubCalled:
+        def __init__(self) -> None:
+            calls["github"] += 1
+
+    class FailIfAICalled:
+        def __init__(self) -> None:
+            calls["ai"] += 1
+
+    monkeypatch.setenv("REVIEW_API_KEY", "test-review-key")
+    monkeypatch.setattr("app.main.GitHubService", FailIfGitHubCalled)
+    monkeypatch.setattr("app.main.AIReviewService", FailIfAICalled)
+
+    response = client.post(
+        "/reviews/Khumo-Hub/AI-PR-Reviewer-application/3"
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid or missing review API key"}
+    assert calls == {"github": 0, "ai": 0}
+
+
+def test_ai_review_endpoint_rejects_wrong_key_before_services(monkeypatch) -> None:
+    calls = {"github": 0}
+
+    class FailIfGitHubCalled:
+        def __init__(self) -> None:
+            calls["github"] += 1
+
+    monkeypatch.setenv("REVIEW_API_KEY", "test-review-key")
+    monkeypatch.setattr("app.main.GitHubService", FailIfGitHubCalled)
+
+    response = client.post(
+        "/reviews/Khumo-Hub/AI-PR-Reviewer-application/3",
+        headers={"X-API-Key": "wrong-key"},
+    )
+
+    assert response.status_code == 401
+    assert calls["github"] == 0
+
+
+def test_ai_review_endpoint_requires_configured_key(monkeypatch) -> None:
+    monkeypatch.delenv("REVIEW_API_KEY", raising=False)
+
+    response = client.post(
+        "/reviews/Khumo-Hub/AI-PR-Reviewer-application/3",
+        headers={"X-API-Key": "some-key"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Review API key is not configured"}
 
 
 def test_repository_must_be_allowed(monkeypatch) -> None:
