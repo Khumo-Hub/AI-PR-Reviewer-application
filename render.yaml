@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: ai-pr-reviewer-application
+    runtime: python
+    region: frankfurt
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.13
+      - key: ALLOWED_GITHUB_REPOSITORIES
+        value: Khumo-Hub/AI-PR-Reviewer-application
+      - key: MAX_PR_DIFF_BYTES
+        value: "500000"
+      - key: OPENAI_MODEL
+        value: gpt-5-mini
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: REVIEW_API_KEY
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: MICROSOFT_TENANT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: OUTLOOK_MAILBOX
+        sync: false
+      - key: OUTLOOK_REVIEW_RECIPIENT
+        sync: false
