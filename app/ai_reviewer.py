@@ -38,7 +38,7 @@ class AIReviewService:
         model: str | None = None,
         client: Any | None = None,
     ) -> None:
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-5-mini")
         self._owns_client = client is None
 
         if client is not None:
