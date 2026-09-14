@@ -10,7 +10,7 @@ When a GitHub pull request is opened or updated, the application will be able to
 - analyse the changes with an AI reviewer;
 - identify risks, bugs, and missing tests;
 - produce a structured review and merge recommendation; and
-- send or draft an Outlook email containing the review summary.
+- create an Outlook draft containing the review summary for human approval.
 
 ## Planned stack
 
@@ -53,6 +53,19 @@ Because this endpoint can trigger paid OpenAI API calls, it is protected by a se
 `X-API-Key: <your REVIEW_API_KEY>`
 
 Requests with a missing or incorrect key are rejected before GitHub is queried or OpenAI is called. If `REVIEW_API_KEY` is not configured, the endpoint fails closed with HTTP 503.
+
+### Generate an AI review and save an Outlook draft
+
+`POST /reviews/{owner}/{repo}/{pr_number}/outlook-draft`
+
+This endpoint performs the same GitHub and OpenAI review flow, formats the structured result as a plain-text email, and creates an Outlook draft through Microsoft Graph. It does not send the message.
+
+The endpoint uses the same `X-API-Key` protection as the AI review endpoint. Configure:
+
+- `MICROSOFT_GRAPH_ACCESS_TOKEN` with a delegated Microsoft Graph access token that has `Mail.ReadWrite` permission;
+- `OUTLOOK_REVIEW_RECIPIENT` with the address that should receive the saved draft.
+
+The response includes the structured AI review plus Outlook draft metadata such as the draft message ID, subject, recipient, and web link when Microsoft Graph supplies one.
 
 For public repositories, GitHub access can work without authentication subject to API rate limits. For private repositories or higher rate limits, set `GITHUB_TOKEN` in the environment.
 
