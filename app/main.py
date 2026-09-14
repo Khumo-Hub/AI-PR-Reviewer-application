@@ -1,4 +1,5 @@
 import hmac
+import logging
 import os
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -12,6 +13,8 @@ from app.webhook_service import (
     tracker,
     verify_github_signature,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="AI PR Reviewer",
@@ -32,29 +35,20 @@ def allowed_github_repositories() -> set[str]:
 def validate_repository(owner: str, repo: str) -> str:
     repository = f"{owner}/{repo}"
     if repository.lower() not in allowed_github_repositories():
-        raise HTTPException(
-            status_code=403,
-            detail="Repository is not allowed for review",
-        )
+        raise HTTPException(status_code=403, detail="Repository is not allowed for review")
     return repository
 
 
 def validate_repository_name(repository: str) -> str:
     if repository.lower() not in allowed_github_repositories():
-        raise HTTPException(
-            status_code=403,
-            detail="Repository is not allowed for review",
-        )
+        raise HTTPException(status_code=403, detail="Repository is not allowed for review")
     return repository
 
 
 def validate_review_api_key(api_key: str | None) -> None:
     configured_api_key = os.getenv("REVIEW_API_KEY")
     if not configured_api_key:
-        raise HTTPException(
-            status_code=503,
-            detail="Review API key is not configured",
-        )
+        raise HTTPException(status_code=503, detail="Review API key is not configured")
 
     if api_key is None or not hmac.compare_digest(api_key, configured_api_key):
         raise HTTPException(
@@ -73,18 +67,29 @@ def build_review_payload(repository: str, review_input: dict, review) -> dict:
 
 
 def run_review_and_create_draft(repository: str, pr_number: int) -> None:
-    github = GitHubService()
+    github = None
     ai = None
     outlook = None
     try:
+        github = GitHubService()
         review_input = github.get_pull_request_review_input(repository, pr_number)
         ai = AIReviewService()
         review = ai.review_pull_request(review_input)
         review_payload = build_review_payload(repository, review_input, review)
         outlook = OutlookService()
         outlook.create_review_draft(review_payload)
+    except (GitHubServiceError, AIReviewerError, OutlookServiceError) as exc:
+        logger.error(
+            "Webhook review failed for %s PR #%s: %s",
+            repository,
+            pr_number,
+            exc,
+        )
+    except Exception:
+        logger.exception("Unexpected webhook review failure for %s PR #%s", repository, pr_number)
     finally:
-        github.close()
+        if github is not None:
+            github.close()
         if ai is not None:
             ai.close()
         if outlook is not None:
@@ -170,10 +175,7 @@ def create_outlook_review_draft(
 
         outlook = OutlookService()
         draft = outlook.create_review_draft(review_payload)
-        return {
-            **review_payload,
-            "outlook_draft": draft,
-        }
+        return {**review_payload, "outlook_draft": draft}
     except GitHubServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except AIReviewerError as exc:
@@ -217,8 +219,9 @@ async def github_webhook(
         return {"status": "action_ignored"}
 
     repository = payload.get("repository", {}).get("full_name")
-    pr_number = payload.get("pull_request", {}).get("number")
-    is_draft = payload.get("pull_request", {}).get("draft", False)
+    pull_request = payload.get("pull_request", {})
+    pr_number = pull_request.get("number")
+    is_draft = pull_request.get("draft", False)
 
     if not isinstance(repository, str) or not isinstance(pr_number, int) or pr_number < 1:
         raise HTTPException(status_code=400, detail="Invalid pull request webhook payload")
