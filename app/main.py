@@ -217,13 +217,15 @@ def get_pull_request(owner: str, repo: str, pr_number: int) -> dict:
         raise HTTPException(status_code=422, detail="Pull request number must be positive")
 
     repository = validate_repository(owner, repo)
-    github = GitHubService()
+    github = None
     try:
+        github = GitHubService()
         return github.get_pull_request_review_input(repository, pr_number)
     except GitHubServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     finally:
-        github.close()
+        if github is not None:
+            github.close()
 
 
 @app.post("/reviews/{owner}/{repo}/{pr_number}")
@@ -239,9 +241,10 @@ def review_pull_request(
         raise HTTPException(status_code=422, detail="Pull request number must be positive")
 
     repository = validate_repository(owner, repo)
-    github = GitHubService()
+    github = None
     ai = None
     try:
+        github = GitHubService()
         review_input = github.get_pull_request_review_input(repository, pr_number)
         ai = AIReviewService()
         review = ai.review_pull_request(review_input)
@@ -251,7 +254,8 @@ def review_pull_request(
     except AIReviewerError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     finally:
-        github.close()
+        if github is not None:
+            github.close()
         if ai is not None:
             ai.close()
 
@@ -269,10 +273,11 @@ def create_outlook_review_draft(
         raise HTTPException(status_code=422, detail="Pull request number must be positive")
 
     repository = validate_repository(owner, repo)
-    github = GitHubService()
+    github = None
     ai = None
     outlook = None
     try:
+        github = GitHubService()
         review_input = github.get_pull_request_review_input(repository, pr_number)
         ai = AIReviewService()
         review = ai.review_pull_request(review_input)
@@ -288,7 +293,8 @@ def create_outlook_review_draft(
     except OutlookServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     finally:
-        github.close()
+        if github is not None:
+            github.close()
         if ai is not None:
             ai.close()
         if outlook is not None:
