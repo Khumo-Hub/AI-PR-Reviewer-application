@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.ai_reviewer import AIReviewResult
@@ -233,3 +234,44 @@ def test_pull_request_number_must_be_positive() -> None:
         "/github/pull-requests/Khumo-Hub/AI-PR-Reviewer-application/0"
     )
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "headers"),
+    [
+        (
+            "get",
+            "/github/pull-requests/Khumo-Hub/AI-PR-Reviewer-application/1",
+            {},
+        ),
+        (
+            "post",
+            "/reviews/Khumo-Hub/AI-PR-Reviewer-application/1",
+            {"X-API-Key": "test-review-key"},
+        ),
+        (
+            "post",
+            "/reviews/Khumo-Hub/AI-PR-Reviewer-application/1/outlook-draft",
+            {"X-API-Key": "test-review-key"},
+        ),
+    ],
+)
+def test_invalid_max_diff_configuration_returns_503(
+    monkeypatch,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+) -> None:
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
+    monkeypatch.setenv("REVIEW_API_KEY", "test-review-key")
+    monkeypatch.setenv("MAX_PR_DIFF_BYTES", "not-a-number")
+
+    response = getattr(client, method)(path, headers=headers)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "MAX_PR_DIFF_BYTES must be a positive integer"
+    }
