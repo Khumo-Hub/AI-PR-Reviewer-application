@@ -32,8 +32,50 @@ class DeliveryTracker:
                 self._seen.discard(oldest)
             return True
 
+    def clear(self) -> None:
+        with self._lock:
+            self._seen.clear()
+            self._order.clear()
+
+
+class ReviewTracker:
+    """Suppress duplicate reviews for the same repository, PR and head commit."""
+
+    def __init__(self, max_entries: int = 1000) -> None:
+        self.max_entries = max_entries
+        self._seen: set[str] = set()
+        self._order: deque[str] = deque()
+        self._lock = Lock()
+
+    @staticmethod
+    def key(repository: str, pr_number: int, head_sha: str) -> str:
+        return f"{repository.lower()}:{pr_number}:{head_sha.lower()}"
+
+    def register(self, repository: str, pr_number: int, head_sha: str) -> bool:
+        key = self.key(repository, pr_number, head_sha)
+        with self._lock:
+            if key in self._seen:
+                return False
+            self._seen.add(key)
+            self._order.append(key)
+            while len(self._order) > self.max_entries:
+                oldest = self._order.popleft()
+                self._seen.discard(oldest)
+            return True
+
+    def discard(self, repository: str, pr_number: int, head_sha: str) -> None:
+        key = self.key(repository, pr_number, head_sha)
+        with self._lock:
+            self._seen.discard(key)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._seen.clear()
+            self._order.clear()
+
 
 tracker = DeliveryTracker()
+review_tracker = ReviewTracker()
 
 
 def verify_github_signature(body: bytes, signature: str | None) -> None:
