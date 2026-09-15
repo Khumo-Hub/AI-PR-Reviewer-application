@@ -2,12 +2,19 @@ import hashlib
 import hmac
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.webhook_service import tracker
+from app.webhook_service import review_tracker, tracker
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def clear_trackers() -> None:
+    tracker.clear()
+    review_tracker.clear()
 
 
 def signed_headers(secret: str, body: bytes, event: str, delivery: str) -> dict[str, str]:
@@ -20,11 +27,19 @@ def signed_headers(secret: str, body: bytes, event: str, delivery: str) -> dict[
     }
 
 
-def pr_payload(action: str = "opened", draft: bool = False) -> dict:
+def pr_payload(
+    action: str = "opened",
+    draft: bool = False,
+    head_sha: str = "abc123",
+) -> dict:
     return {
         "action": action,
         "repository": {"full_name": "Khumo-Hub/AI-PR-Reviewer-application"},
-        "pull_request": {"number": 6, "draft": draft},
+        "pull_request": {
+            "number": 6,
+            "draft": draft,
+            "head": {"sha": head_sha},
+        },
     }
 
 
@@ -113,10 +128,10 @@ def test_repository_allowlist_applies_to_webhook(monkeypatch) -> None:
 
 
 def test_supported_pull_request_schedules_review(monkeypatch) -> None:
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[str, int, str]] = []
 
-    def fake_worker(repository: str, pr_number: int) -> None:
-        calls.append((repository, pr_number))
+    def fake_worker(repository: str, pr_number: int, head_sha: str) -> None:
+        calls.append((repository, pr_number, head_sha))
 
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret")
     monkeypatch.setenv(
@@ -125,7 +140,7 @@ def test_supported_pull_request_schedules_review(monkeypatch) -> None:
     )
     monkeypatch.setattr("app.main.run_review_and_create_draft", fake_worker)
 
-    body = json.dumps(pr_payload(action="synchronize")).encode()
+    body = json.dumps(pr_payload(action="synchronize", head_sha="sha-1")).encode()
     response = client.post(
         "/webhooks/github",
         content=body,
@@ -134,7 +149,7 @@ def test_supported_pull_request_schedules_review(monkeypatch) -> None:
 
     assert response.status_code == 202
     assert response.json() == {"status": "review_scheduled"}
-    assert calls == [("Khumo-Hub/AI-PR-Reviewer-application", 6)]
+    assert calls == [("Khumo-Hub/AI-PR-Reviewer-application", 6, "sha-1")]
 
 
 def test_duplicate_delivery_is_ignored(monkeypatch) -> None:
@@ -148,6 +163,90 @@ def test_duplicate_delivery_is_ignored(monkeypatch) -> None:
     assert first.status_code == 202
     assert second.status_code == 202
     assert second.json() == {"status": "duplicate_ignored"}
+
+
+def test_same_pr_head_is_not_reviewed_twice(monkeypatch) -> None:
+    calls: list[tuple[str, int, str]] = []
+
+    def fake_worker(repository: str, pr_number: int, head_sha: str) -> None:
+        calls.append((repository, pr_number, head_sha))
+
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret")
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
+    monkeypatch.setattr("app.main.run_review_and_create_draft", fake_worker)
+
+    body = json.dumps(pr_payload(head_sha="same-sha")).encode()
+    first = client.post(
+        "/webhooks/github",
+        content=body,
+        headers=signed_headers("secret", body, "pull_request", "delivery-1"),
+    )
+    second = client.post(
+        "/webhooks/github",
+        content=body,
+        headers=signed_headers("secret", body, "pull_request", "delivery-2"),
+    )
+
+    assert first.json() == {"status": "review_scheduled"}
+    assert second.json() == {"status": "review_already_scheduled"}
+    assert calls == [("Khumo-Hub/AI-PR-Reviewer-application", 6, "same-sha")]
+
+
+def test_new_head_sha_schedules_a_new_review(monkeypatch) -> None:
+    calls: list[tuple[str, int, str]] = []
+
+    def fake_worker(repository: str, pr_number: int, head_sha: str) -> None:
+        calls.append((repository, pr_number, head_sha))
+
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret")
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
+    monkeypatch.setattr("app.main.run_review_and_create_draft", fake_worker)
+
+    first_body = json.dumps(pr_payload(head_sha="sha-1")).encode()
+    second_body = json.dumps(pr_payload(action="synchronize", head_sha="sha-2")).encode()
+
+    first = client.post(
+        "/webhooks/github",
+        content=first_body,
+        headers=signed_headers("secret", first_body, "pull_request", "head-1"),
+    )
+    second = client.post(
+        "/webhooks/github",
+        content=second_body,
+        headers=signed_headers("secret", second_body, "pull_request", "head-2"),
+    )
+
+    assert first.json() == {"status": "review_scheduled"}
+    assert second.json() == {"status": "review_scheduled"}
+    assert calls == [
+        ("Khumo-Hub/AI-PR-Reviewer-application", 6, "sha-1"),
+        ("Khumo-Hub/AI-PR-Reviewer-application", 6, "sha-2"),
+    ]
+
+
+def test_missing_head_sha_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret")
+    monkeypatch.setenv(
+        "ALLOWED_GITHUB_REPOSITORIES",
+        "Khumo-Hub/AI-PR-Reviewer-application",
+    )
+    payload = pr_payload()
+    payload["pull_request"].pop("head")
+    body = json.dumps(payload).encode()
+
+    response = client.post(
+        "/webhooks/github",
+        content=body,
+        headers=signed_headers("secret", body, "pull_request", "missing-head"),
+    )
+
+    assert response.status_code == 400
 
 
 def test_malformed_pull_request_payload_is_rejected(monkeypatch) -> None:
