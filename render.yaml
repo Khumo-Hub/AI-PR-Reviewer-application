@@ -17,7 +17,7 @@ services:
       - key: MAX_PR_DIFF_BYTES
         value: "500000"
       - key: OPENAI_MODEL
-        value: gpt-5-mini
+        value: gpt-5.6-luna
       - key: MICROSOFT_AUTHORITY
         value: https://login.microsoftonline.com/common
       - key: MICROSOFT_TOKEN_CACHE_PATH
@@ -35,4 +35,8 @@ services:
       - key: MICROSOFT_REDIRECT_URI
         sync: false
       - key: OUTLOOK_REVIEW_RECIPIENT
+        sync: false
+      # Optional. Set this to a path on a persistent disk in production,
+      # for example /var/data/review_state.json.
+      - key: REVIEW_STATE_PATH
         sync: false
