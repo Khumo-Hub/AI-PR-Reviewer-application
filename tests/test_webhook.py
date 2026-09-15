@@ -5,7 +5,8 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.github_service import GitHubServiceError
+from app.main import app, run_review_and_create_draft
 from app.webhook_service import ReviewTracker, review_tracker, tracker
 
 client = TestClient(app)
@@ -247,6 +248,50 @@ def test_missing_head_sha_is_rejected(monkeypatch) -> None:
     )
 
     assert response.status_code == 400
+
+
+def test_stale_webhook_is_skipped_before_ai(monkeypatch) -> None:
+    repository = "Khumo-Hub/AI-PR-Reviewer-application"
+    review_tracker.register(repository, 6, "old-sha")
+
+    class FakeGitHubService:
+        def get_pull_request_review_input(self, repo: str, number: int) -> dict:
+            return {
+                "repository": repo,
+                "pull_request": {"number": number, "head_sha": "new-sha"},
+                "diff": "",
+            }
+
+        def close(self) -> None:
+            pass
+
+    def unexpected_ai_service():
+        raise AssertionError("AI service must not run for stale webhook work")
+
+    monkeypatch.setattr("app.main.GitHubService", FakeGitHubService)
+    monkeypatch.setattr("app.main.AIReviewService", unexpected_ai_service)
+
+    run_review_and_create_draft(repository, 6, "old-sha")
+
+    assert review_tracker.register(repository, 6, "old-sha") is False
+
+
+def test_failed_worker_releases_review_key_for_retry(monkeypatch) -> None:
+    repository = "Khumo-Hub/AI-PR-Reviewer-application"
+    review_tracker.register(repository, 6, "retry-sha")
+
+    class FailingGitHubService:
+        def get_pull_request_review_input(self, repo: str, number: int) -> dict:
+            raise GitHubServiceError(502, "temporary failure")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("app.main.GitHubService", FailingGitHubService)
+
+    run_review_and_create_draft(repository, 6, "retry-sha")
+
+    assert review_tracker.register(repository, 6, "retry-sha") is True
 
 
 def test_persistent_review_tracker_survives_recreation(tmp_path) -> None:
