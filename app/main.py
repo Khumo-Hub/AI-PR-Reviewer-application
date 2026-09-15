@@ -13,6 +13,7 @@ from app.outlook_service import OutlookService, OutlookServiceError
 from app.webhook_service import (
     SUPPORTED_PULL_REQUEST_ACTIONS,
     parse_webhook_payload,
+    review_tracker,
     tracker,
     verify_github_signature,
 )
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="AI PR Reviewer",
     description="AI-assisted GitHub pull-request review service.",
-    version="0.7.0",
+    version="0.8.0",
 )
 
 _microsoft_flow_lock = threading.Lock()
@@ -97,28 +98,60 @@ def _pop_microsoft_flow(state: str | None) -> dict:
     return flow
 
 
-def run_review_and_create_draft(repository: str, pr_number: int) -> None:
+def run_review_and_create_draft(
+    repository: str,
+    pr_number: int,
+    expected_head_sha: str,
+) -> None:
     github = None
     ai = None
     outlook = None
+    completed = False
     try:
         github = GitHubService()
         review_input = github.get_pull_request_review_input(repository, pr_number)
+        current_head_sha = review_input.get("pull_request", {}).get("head_sha")
+        if current_head_sha != expected_head_sha:
+            logger.info(
+                "Skipping stale webhook review for %s PR #%s: expected head %s, current head %s",
+                repository,
+                pr_number,
+                expected_head_sha,
+                current_head_sha,
+            )
+            return
+
         ai = AIReviewService()
         review = ai.review_pull_request(review_input)
         review_payload = build_review_payload(repository, review_input, review)
         outlook = OutlookService()
         outlook.create_review_draft(review_payload)
-    except (GitHubServiceError, AIReviewerError, OutlookServiceError) as exc:
-        logger.error(
-            "Webhook review failed for %s PR #%s: %s",
+        review_tracker.mark_completed(repository, pr_number, expected_head_sha)
+        completed = True
+        logger.info(
+            "Webhook review completed for %s PR #%s at head %s",
             repository,
             pr_number,
+            expected_head_sha,
+        )
+    except (GitHubServiceError, AIReviewerError, OutlookServiceError) as exc:
+        logger.error(
+            "Webhook review failed for %s PR #%s at head %s: %s",
+            repository,
+            pr_number,
+            expected_head_sha,
             exc,
         )
     except Exception:
-        logger.exception("Unexpected webhook review failure for %s PR #%s", repository, pr_number)
+        logger.exception(
+            "Unexpected webhook review failure for %s PR #%s at head %s",
+            repository,
+            pr_number,
+            expected_head_sha,
+        )
     finally:
+        if not completed:
+            review_tracker.discard(repository, pr_number, expected_head_sha)
         if github is not None:
             github.close()
         if ai is not None:
@@ -184,13 +217,15 @@ def get_pull_request(owner: str, repo: str, pr_number: int) -> dict:
         raise HTTPException(status_code=422, detail="Pull request number must be positive")
 
     repository = validate_repository(owner, repo)
-    github = GitHubService()
+    github = None
     try:
+        github = GitHubService()
         return github.get_pull_request_review_input(repository, pr_number)
     except GitHubServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     finally:
-        github.close()
+        if github is not None:
+            github.close()
 
 
 @app.post("/reviews/{owner}/{repo}/{pr_number}")
@@ -206,9 +241,10 @@ def review_pull_request(
         raise HTTPException(status_code=422, detail="Pull request number must be positive")
 
     repository = validate_repository(owner, repo)
-    github = GitHubService()
+    github = None
     ai = None
     try:
+        github = GitHubService()
         review_input = github.get_pull_request_review_input(repository, pr_number)
         ai = AIReviewService()
         review = ai.review_pull_request(review_input)
@@ -218,7 +254,8 @@ def review_pull_request(
     except AIReviewerError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     finally:
-        github.close()
+        if github is not None:
+            github.close()
         if ai is not None:
             ai.close()
 
@@ -236,10 +273,11 @@ def create_outlook_review_draft(
         raise HTTPException(status_code=422, detail="Pull request number must be positive")
 
     repository = validate_repository(owner, repo)
-    github = GitHubService()
+    github = None
     ai = None
     outlook = None
     try:
+        github = GitHubService()
         review_input = github.get_pull_request_review_input(repository, pr_number)
         ai = AIReviewService()
         review = ai.review_pull_request(review_input)
@@ -255,7 +293,8 @@ def create_outlook_review_draft(
     except OutlookServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     finally:
-        github.close()
+        if github is not None:
+            github.close()
         if ai is not None:
             ai.close()
         if outlook is not None:
@@ -293,9 +332,16 @@ async def github_webhook(
     repository = payload.get("repository", {}).get("full_name")
     pull_request = payload.get("pull_request", {})
     pr_number = pull_request.get("number")
+    head_sha = pull_request.get("head", {}).get("sha")
     is_draft = pull_request.get("draft", False)
 
-    if not isinstance(repository, str) or not isinstance(pr_number, int) or pr_number < 1:
+    if (
+        not isinstance(repository, str)
+        or not isinstance(pr_number, int)
+        or pr_number < 1
+        or not isinstance(head_sha, str)
+        or not head_sha
+    ):
         raise HTTPException(status_code=400, detail="Invalid pull request webhook payload")
 
     validate_repository_name(repository)
@@ -303,5 +349,13 @@ async def github_webhook(
     if is_draft:
         return {"status": "draft_ignored"}
 
-    background_tasks.add_task(run_review_and_create_draft, repository, pr_number)
+    if not review_tracker.register(repository, pr_number, head_sha):
+        return {"status": "review_already_scheduled"}
+
+    background_tasks.add_task(
+        run_review_and_create_draft,
+        repository,
+        pr_number,
+        head_sha,
+    )
     return {"status": "review_scheduled"}
