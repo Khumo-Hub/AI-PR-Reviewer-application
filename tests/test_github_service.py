@@ -99,3 +99,22 @@ def test_large_diff_is_rejected() -> None:
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == "Pull request diff is too large to review"
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "0", "-1"])
+def test_invalid_max_diff_env_fails_closed(monkeypatch, value: str) -> None:
+    monkeypatch.setenv("MAX_PR_DIFF_BYTES", value)
+
+    with pytest.raises(GitHubServiceError) as exc_info:
+        GitHubService(client=httpx.Client())
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "MAX_PR_DIFF_BYTES must be a positive integer"
+
+
+def test_explicit_zero_max_diff_is_rejected() -> None:
+    with pytest.raises(GitHubServiceError) as exc_info:
+        GitHubService(client=httpx.Client(), max_diff_bytes=0)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "MAX_PR_DIFF_BYTES must be a positive integer"
