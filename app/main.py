@@ -119,8 +119,6 @@ def run_review_and_create_draft(
                 expected_head_sha,
                 current_head_sha,
             )
-            review_tracker.mark_completed(repository, pr_number, expected_head_sha)
-            completed = True
             return
 
         ai = AIReviewService()
