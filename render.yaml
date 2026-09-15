@@ -18,19 +18,21 @@ services:
         value: "500000"
       - key: OPENAI_MODEL
         value: gpt-5-mini
+      - key: MICROSOFT_AUTHORITY
+        value: https://login.microsoftonline.com/common
+      - key: MICROSOFT_TOKEN_CACHE_PATH
+        value: .data/msal_token_cache.json
       - key: OPENAI_API_KEY
         sync: false
       - key: REVIEW_API_KEY
         sync: false
       - key: GITHUB_WEBHOOK_SECRET
         sync: false
-      - key: MICROSOFT_TENANT_ID
-        sync: false
       - key: MICROSOFT_CLIENT_ID
         sync: false
       - key: MICROSOFT_CLIENT_SECRET
         sync: false
-      - key: OUTLOOK_MAILBOX
+      - key: MICROSOFT_REDIRECT_URI
         sync: false
       - key: OUTLOOK_REVIEW_RECIPIENT
         sync: false

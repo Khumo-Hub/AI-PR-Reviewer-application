@@ -4,23 +4,17 @@ An AI-assisted pull-request review application that connects GitHub, OpenAI, and
 
 ## Goal
 
-When a GitHub pull request is opened or updated, the application will be able to:
+When a GitHub pull request is opened or updated, the application can retrieve the pull-request metadata and code changes, analyse them with an AI reviewer, identify risks and missing tests, produce a structured recommendation, and save the review as an Outlook draft for human approval.
 
-- retrieve the pull-request metadata and code changes;
-- analyse the changes with an AI reviewer;
-- identify risks, bugs, and missing tests;
-- produce a structured review and merge recommendation; and
-- create an Outlook draft containing the review summary for human approval.
+## Stack
 
-## Planned stack
-
-- Python
-- FastAPI
+- Python / FastAPI
 - GitHub API and webhooks
 - OpenAI API
 - Microsoft Graph / Outlook
 - Pytest
 - GitHub Actions
+- Render
 
 ## Current API
 
@@ -32,96 +26,98 @@ When a GitHub pull request is opened or updated, the application will be able to
 
 `GET /github/pull-requests/{owner}/{repo}/{pr_number}`
 
-The response contains structured pull-request metadata plus the unified diff.
-
 ### Generate an AI pull-request review
 
 `POST /reviews/{owner}/{repo}/{pr_number}`
 
-This endpoint retrieves the pull request from GitHub and sends the metadata and diff to the OpenAI Responses API. The response contains a structured review with summary, risk, concrete issues, missing tests, and a recommendation of `approve`, `changes_requested`, or `manual_review`.
+This endpoint is protected by `REVIEW_API_KEY`, supplied through the `X-API-Key` header.
 
-Set `OPENAI_API_KEY` in the environment. `OPENAI_MODEL` optionally overrides the default model.
+### Connect a Microsoft mailbox
 
-Because this endpoint can trigger paid OpenAI API calls, it is protected by a service API key. Set `REVIEW_API_KEY` to a long random secret and include it as `X-API-Key` on every AI review request. Missing or incorrect keys are rejected before GitHub is queried or OpenAI is called.
+`POST /microsoft/connect`
+
+This protected endpoint starts the delegated Microsoft OAuth authorization-code flow and returns an `authorization_url`. Open that URL in a browser, sign in to the Microsoft account whose mailbox should be used, and consent to delegated `Mail.ReadWrite` access.
+
+Microsoft redirects back to:
+
+`GET /microsoft/callback`
+
+The callback validates the OAuth state, completes the authorization-code flow, and writes the MSAL token cache. Later Graph calls use `acquire_token_silent`, allowing MSAL to reuse or renew the delegated access token without storing a raw access token in configuration.
+
+`GET /microsoft/status` is also protected by `X-API-Key` and reports whether a mailbox account is currently connected.
+
+The Microsoft app registration should support **Accounts in any organizational directory and personal Microsoft accounts**. Configure these environment values:
+
+- `MICROSOFT_CLIENT_ID`
+- `MICROSOFT_CLIENT_SECRET`
+- `MICROSOFT_AUTHORITY=https://login.microsoftonline.com/common`
+- `MICROSOFT_REDIRECT_URI=https://<your-render-service>.onrender.com/microsoft/callback`
+- `MICROSOFT_TOKEN_CACHE_PATH=.data/msal_token_cache.json`
+- `OUTLOOK_REVIEW_RECIPIENT`
+
+The old tenant-specific `MICROSOFT_TENANT_ID` and `OUTLOOK_MAILBOX` settings are no longer required.
 
 ### Generate an AI review and save an Outlook draft
 
 `POST /reviews/{owner}/{repo}/{pr_number}/outlook-draft`
 
-This endpoint performs the same GitHub and OpenAI review flow, formats the structured result as a plain-text email, and creates an Outlook draft through Microsoft Graph. It does not send the message.
+This endpoint runs the GitHub and OpenAI review flow and creates a draft through Microsoft Graph using delegated authorization. Draft creation uses:
 
-The Outlook integration uses renewable app-only Microsoft authentication through MSAL. Configure:
+`POST /me/messages`
 
-- `MICROSOFT_TENANT_ID` with the Microsoft Entra tenant ID;
-- `MICROSOFT_CLIENT_ID` with the registered application client ID;
-- `MICROSOFT_CLIENT_SECRET` with the application secret;
-- `OUTLOOK_MAILBOX` with the mailbox in which the draft should be created; and
-- `OUTLOOK_REVIEW_RECIPIENT` with the address placed in the draft's To field.
-
-The Entra application must have Microsoft Graph `Mail.ReadWrite` **application** permission with administrator consent. The service acquires tokens using the client-credentials flow and MSAL automatically reuses its application token cache or obtains a fresh token when required. A short-lived Graph access token is therefore not stored in `.env`.
-
-With app-only authentication, drafts are created via `/users/{mailbox}/messages`. The response is accepted only when Microsoft Graph returns a message ID and explicitly reports `isDraft: true`.
+The response is accepted only when Microsoft Graph returns a message ID and explicitly reports `isDraft: true`.
 
 ### Receive GitHub pull-request webhooks
 
 `POST /webhooks/github`
 
-GitHub can call this endpoint when pull requests change. Configure a long random `GITHUB_WEBHOOK_SECRET` in both the application environment and the GitHub webhook settings. The service verifies the raw request body against the `X-Hub-Signature-256` header before processing the payload.
+GitHub calls this endpoint for pull-request events. The service validates `X-Hub-Signature-256` with `GITHUB_WEBHOOK_SECRET`, enforces the repository allowlist, filters supported PR actions, acknowledges quickly with HTTP 202, and runs GitHub → OpenAI → Outlook processing in a background task.
 
-The webhook responds to GitHub quickly with HTTP 202 and schedules the existing GitHub → OpenAI → Outlook draft workflow in a FastAPI background task. Automation runs for non-draft pull requests on these actions: `opened`, `reopened`, `synchronize`, and `ready_for_review`.
+Automation runs for non-draft pull requests on `opened`, `reopened`, `synchronize`, and `ready_for_review`.
 
-Other GitHub event types and unsupported pull-request actions are acknowledged and ignored. Repository allowlisting still applies, and duplicate `X-GitHub-Delivery` IDs are ignored using a bounded in-memory tracker.
+## Microsoft token-cache reliability
 
-The current in-process background task and delivery tracker are suitable for this first deployment. A later production-hardening step can move jobs and idempotency to durable infrastructure such as a queue/cache so work survives process restarts and multiple application instances.
+The delegated design uses an MSAL token cache so access tokens can be renewed without repeatedly asking the user to sign in. The default cache is stored at `.data/msal_token_cache.json`, which is excluded from Git.
 
-For public repositories, GitHub access can work without authentication subject to API rate limits. For private repositories or higher rate limits, set `GITHUB_TOKEN` in the environment.
-
-For security, the API is deny-by-default: only repositories listed in `ALLOWED_GITHUB_REPOSITORIES` can be fetched. Large pull-request diffs are rejected before the AI-review stage. Pull-request content is treated as untrusted data in the AI-review prompt.
-
-Copy `.env.example` as a starting point and never commit real credentials.
+On Render's free web-service filesystem, this cache is **not durable across instance replacement or redeployment**. If the cache disappears, `/microsoft/status` will show that no account is connected and `/microsoft/connect` must be used again. Before production use, move the serialized MSAL cache to durable encrypted storage.
 
 ## Continuous integration
 
-GitHub Actions runs the complete Pytest suite for every pull request and every push to `main` using Python 3.11. The workflow uses read-only repository permissions, pip dependency caching, a 10-minute job timeout, and a stable `tests` job name intended to be used as the required status check for protected merges.
-
-To enforce CI before merge, configure the repository's `main` branch protection or ruleset to require the `tests` status check after the workflow has run at least once.
+GitHub Actions runs the complete Pytest suite for every pull request and every push to `main` using Python 3.11. The workflow uses read-only repository permissions, pip dependency caching, a 10-minute timeout, and a stable `tests` job name.
 
 ## Deployment on Render
 
-A Render Blueprint is provided in `render.yaml`. It creates a Python web service in the Frankfurt region, installs `requirements.txt`, starts FastAPI with Uvicorn, and uses `/health` for health checks.
+A Render Blueprint is provided in `render.yaml`. It creates a Python web service in Frankfurt, installs `requirements.txt`, starts FastAPI with Uvicorn, and uses `/health` for health checks.
 
-The service is configured to deploy from `main` only after CI checks pass. Secret values are declared with `sync: false`, so Render asks for them during the initial Blueprint creation rather than storing them in Git.
-
-Required deployment secrets/configuration include:
+Required deployment values include:
 
 - `OPENAI_API_KEY`
 - `REVIEW_API_KEY`
 - `GITHUB_WEBHOOK_SECRET`
-- `MICROSOFT_TENANT_ID`
 - `MICROSOFT_CLIENT_ID`
 - `MICROSOFT_CLIENT_SECRET`
-- `OUTLOOK_MAILBOX`
+- `MICROSOFT_REDIRECT_URI`
 - `OUTLOOK_REVIEW_RECIPIENT`
 
-After deployment, confirm `GET /health` returns `{"status":"ok"}` over HTTPS. Then register a GitHub repository webhook whose payload URL is:
+After deployment, verify `GET /health` returns `{"status":"ok"}`. Then complete `/microsoft/connect` once and register the GitHub repository webhook at:
 
 `https://<your-render-service>.onrender.com/webhooks/github`
 
-Use `application/json`, set the same `GITHUB_WEBHOOK_SECRET`, enable SSL verification, and subscribe to pull-request events.
+Use `application/json`, the same `GITHUB_WEBHOOK_SECRET`, SSL verification, and pull-request events.
 
-The Blueprint currently uses Render's free plan for initial testing. Free services can spin down when idle, so use an always-on paid instance before relying on the webhook for production-grade responsiveness and delivery reliability.
+The Blueprint uses Render's free plan for initial testing. Move to an always-on service and durable token-cache storage before relying on the integration for production automation.
 
 ## Development workflow
 
-The application is developed through feature branches and pull requests rather than committing features directly to `main`.
+The application is developed through feature branches and pull requests rather than committing directly to `main`.
 
 ### Roadmap
 
-1. FastAPI application foundation and health endpoint
-2. GitHub pull-request integration
-3. AI pull-request review service
-4. Outlook email integration
-5. GitHub Actions and automated tests
+1. FastAPI application foundation
+2. GitHub PR integration
+3. AI PR review service
+4. Outlook draft integration
+5. GitHub Actions CI
 6. GitHub webhook automation
 7. Public deployment and GitHub webhook registration
 8. Optional review dashboard

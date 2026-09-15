@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from urllib.parse import quote
 from typing import Any
 
 import httpx
@@ -65,17 +64,13 @@ def format_review_email(review_payload: dict[str, Any]) -> tuple[str, str]:
 class OutlookService:
     def __init__(
         self,
-        mailbox: str | None = None,
         recipient: str | None = None,
         auth_service: MicrosoftAuthService | None = None,
         client: httpx.Client | None = None,
         base_url: str = "https://graph.microsoft.com/v1.0",
     ) -> None:
-        self.mailbox = mailbox or os.getenv("OUTLOOK_MAILBOX")
         self.recipient = recipient or os.getenv("OUTLOOK_REVIEW_RECIPIENT")
         self.base_url = base_url.rstrip("/")
-        if not self.mailbox:
-            raise OutlookServiceError(503, "Outlook mailbox is not configured")
         if not self.recipient:
             raise OutlookServiceError(503, "Outlook review recipient is not configured")
         try:
@@ -103,10 +98,9 @@ class OutlookService:
             "toRecipients": [{"emailAddress": {"address": self.recipient}}],
         }
         access_token = self._access_token()
-        mailbox = quote(self.mailbox, safe="@._-")
         try:
             response = self.client.post(
-                f"{self.base_url}/users/{mailbox}/messages",
+                f"{self.base_url}/me/messages",
                 headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
                 json=message,
             )
@@ -116,9 +110,7 @@ class OutlookService:
             if response.status_code == 401:
                 detail, status_code = "Microsoft Graph authentication failed", 503
             elif response.status_code == 403:
-                detail, status_code = "Microsoft Graph Mail.ReadWrite application permission is required", 503
-            elif response.status_code == 404:
-                detail, status_code = "Outlook mailbox was not found or is not accessible", 503
+                detail, status_code = "Microsoft Graph Mail.ReadWrite delegated permission is required", 503
             elif response.status_code == 429:
                 detail, status_code = "Microsoft Graph rate limit exceeded", 503
             else:
@@ -135,7 +127,6 @@ class OutlookService:
                 "subject": data.get("subject", subject),
                 "is_draft": True,
                 "web_link": data.get("webLink"),
-                "mailbox": self.mailbox,
                 "recipient": self.recipient,
             }
         except (KeyError, TypeError, ValueError) as exc:

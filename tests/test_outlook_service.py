@@ -52,11 +52,11 @@ def test_format_review_email() -> None:
     assert "saved as a draft" in body
 
 
-def test_create_review_draft_uses_mailbox_endpoint_and_fresh_token() -> None:
+def test_create_review_draft_uses_me_endpoint_and_delegated_token() -> None:
     auth = FakeAuthService()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1.0/users/reviewer@example.com/messages"
+        assert request.url.path == "/v1.0/me/messages"
         assert request.headers["Authorization"] == "Bearer test-token"
         return httpx.Response(201, json={
             "id": "draft-123",
@@ -67,7 +67,6 @@ def test_create_review_draft_uses_mailbox_endpoint_and_fresh_token() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         outlook = OutlookService(
-            mailbox="reviewer@example.com",
             recipient="reviewer@example.com",
             auth_service=auth,
             client=client,
@@ -78,28 +77,20 @@ def test_create_review_draft_uses_mailbox_endpoint_and_fresh_token() -> None:
     assert auth.calls == 1
     assert result["id"] == "draft-123"
     assert result["is_draft"] is True
-    assert result["mailbox"] == "reviewer@example.com"
-
-
-def test_missing_mailbox(monkeypatch) -> None:
-    monkeypatch.delenv("OUTLOOK_MAILBOX", raising=False)
-    with pytest.raises(OutlookServiceError) as exc_info:
-        OutlookService(recipient="reviewer@example.com", auth_service=FakeAuthService())
-    assert exc_info.value.detail == "Outlook mailbox is not configured"
+    assert result["recipient"] == "reviewer@example.com"
 
 
 def test_missing_recipient(monkeypatch) -> None:
     monkeypatch.delenv("OUTLOOK_REVIEW_RECIPIENT", raising=False)
     with pytest.raises(OutlookServiceError) as exc_info:
-        OutlookService(mailbox="reviewer@example.com", auth_service=FakeAuthService())
+        OutlookService(auth_service=FakeAuthService())
     assert exc_info.value.detail == "Outlook review recipient is not configured"
 
 
 def test_auth_failure_is_mapped() -> None:
-    auth = FakeAuthService(error=MicrosoftAuthError(503, "Microsoft authentication failed"))
+    auth = FakeAuthService(error=MicrosoftAuthError(503, "Microsoft mailbox authorization is required"))
     with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500))) as client:
         outlook = OutlookService(
-            mailbox="reviewer@example.com",
             recipient="reviewer@example.com",
             auth_service=auth,
             client=client,
@@ -107,15 +98,14 @@ def test_auth_failure_is_mapped() -> None:
         with pytest.raises(OutlookServiceError) as exc_info:
             outlook.create_review_draft(review_payload())
     assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Microsoft authentication failed"
+    assert exc_info.value.detail == "Microsoft mailbox authorization is required"
 
 
 @pytest.mark.parametrize(
     ("status_code", "expected_detail"),
     [
         (401, "Microsoft Graph authentication failed"),
-        (403, "Microsoft Graph Mail.ReadWrite application permission is required"),
-        (404, "Outlook mailbox was not found or is not accessible"),
+        (403, "Microsoft Graph Mail.ReadWrite delegated permission is required"),
         (429, "Microsoft Graph rate limit exceeded"),
         (500, "Microsoft Graph draft creation failed"),
     ],
@@ -126,7 +116,6 @@ def test_graph_error_responses(status_code: int, expected_detail: str) -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         outlook = OutlookService(
-            mailbox="reviewer@example.com",
             recipient="reviewer@example.com",
             auth_service=FakeAuthService(),
             client=client,
@@ -143,7 +132,6 @@ def test_graph_network_failure() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         outlook = OutlookService(
-            mailbox="reviewer@example.com",
             recipient="reviewer@example.com",
             auth_service=FakeAuthService(),
             client=client,
@@ -169,7 +157,6 @@ def test_invalid_draft_response_is_rejected(response_json: dict) -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         outlook = OutlookService(
-            mailbox="reviewer@example.com",
             recipient="reviewer@example.com",
             auth_service=FakeAuthService(),
             client=client,

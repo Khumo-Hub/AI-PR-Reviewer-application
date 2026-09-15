@@ -1,11 +1,14 @@
 import hmac
 import logging
 import os
+import threading
+import time
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 
 from app.ai_reviewer import AIReviewService, AIReviewerError
 from app.github_service import GitHubService, GitHubServiceError
+from app.microsoft_auth import MicrosoftAuthError, MicrosoftAuthService
 from app.outlook_service import OutlookService, OutlookServiceError
 from app.webhook_service import (
     SUPPORTED_PULL_REQUEST_ACTIONS,
@@ -19,8 +22,12 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="AI PR Reviewer",
     description="AI-assisted GitHub pull-request review service.",
-    version="0.6.0",
+    version="0.7.0",
 )
+
+_microsoft_flow_lock = threading.Lock()
+_microsoft_flows: dict[str, tuple[dict, float]] = {}
+_MICROSOFT_FLOW_TTL_SECONDS = 600
 
 
 def allowed_github_repositories() -> set[str]:
@@ -66,6 +73,30 @@ def build_review_payload(repository: str, review_input: dict, review) -> dict:
     }
 
 
+def _store_microsoft_flow(flow: dict) -> None:
+    state = flow["state"]
+    expires_at = time.monotonic() + _MICROSOFT_FLOW_TTL_SECONDS
+    with _microsoft_flow_lock:
+        now = time.monotonic()
+        expired = [key for key, (_, expiry) in _microsoft_flows.items() if expiry <= now]
+        for key in expired:
+            _microsoft_flows.pop(key, None)
+        _microsoft_flows[state] = (flow, expires_at)
+
+
+def _pop_microsoft_flow(state: str | None) -> dict:
+    if not state:
+        raise HTTPException(status_code=400, detail="Missing Microsoft OAuth state")
+    with _microsoft_flow_lock:
+        entry = _microsoft_flows.pop(state, None)
+    if entry is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired Microsoft OAuth state")
+    flow, expires_at = entry
+    if expires_at <= time.monotonic():
+        raise HTTPException(status_code=400, detail="Invalid or expired Microsoft OAuth state")
+    return flow
+
+
 def run_review_and_create_draft(repository: str, pr_number: int) -> None:
     github = None
     ai = None
@@ -104,6 +135,47 @@ def root() -> dict[str, str]:
 @app.get("/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/microsoft/connect")
+def connect_microsoft_mailbox(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict[str, str]:
+    validate_review_api_key(x_api_key)
+    try:
+        auth = MicrosoftAuthService()
+        flow = auth.begin_authorization()
+        _store_microsoft_flow(flow)
+        return {"authorization_url": flow["auth_uri"]}
+    except MicrosoftAuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.get("/microsoft/callback")
+def microsoft_oauth_callback(request: Request) -> dict:
+    state = request.query_params.get("state")
+    flow = _pop_microsoft_flow(state)
+    try:
+        auth = MicrosoftAuthService()
+        result = auth.complete_authorization(flow, dict(request.query_params))
+        return {
+            **result,
+            "message": "Microsoft mailbox connected. You can return to the AI PR Reviewer application.",
+        }
+    except MicrosoftAuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.get("/microsoft/status")
+def microsoft_connection_status(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict:
+    validate_review_api_key(x_api_key)
+    try:
+        auth = MicrosoftAuthService()
+        return auth.connection_status()
+    except MicrosoftAuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 @app.get("/github/pull-requests/{owner}/{repo}/{pr_number}")
