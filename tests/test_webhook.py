@@ -294,11 +294,20 @@ def test_failed_worker_releases_review_key_for_retry(monkeypatch) -> None:
     assert review_tracker.register(repository, 6, "retry-sha") is True
 
 
-def test_persistent_review_tracker_survives_recreation(tmp_path) -> None:
+def test_inflight_review_is_not_persisted_across_recreation(tmp_path) -> None:
     state_path = tmp_path / "review-state.json"
     first = ReviewTracker(state_path=str(state_path))
+    assert first.register("owner/repo", 9, "abc123") is True
 
+    second = ReviewTracker(state_path=str(state_path))
+    assert second.register("owner/repo", 9, "abc123") is True
+
+
+def test_completed_review_tracker_survives_recreation(tmp_path) -> None:
+    state_path = tmp_path / "review-state.json"
+    first = ReviewTracker(state_path=str(state_path))
     assert first.register("Owner/Repo", 9, "ABC123") is True
+    first.mark_completed("Owner/Repo", 9, "ABC123")
 
     second = ReviewTracker(state_path=str(state_path))
     assert second.register("owner/repo", 9, "abc123") is False
@@ -308,7 +317,7 @@ def test_persistent_review_tracker_discard_allows_retry(tmp_path) -> None:
     state_path = tmp_path / "review-state.json"
     first = ReviewTracker(state_path=str(state_path))
     assert first.register("owner/repo", 9, "abc123") is True
-
+    first.mark_completed("owner/repo", 9, "abc123")
     first.discard("owner/repo", 9, "abc123")
 
     second = ReviewTracker(state_path=str(state_path))
