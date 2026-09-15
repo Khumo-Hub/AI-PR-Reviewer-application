@@ -119,6 +119,7 @@ def run_review_and_create_draft(
                 expected_head_sha,
                 current_head_sha,
             )
+            review_tracker.mark_completed(repository, pr_number, expected_head_sha)
             completed = True
             return
 
@@ -127,6 +128,7 @@ def run_review_and_create_draft(
         review_payload = build_review_payload(repository, review_input, review)
         outlook = OutlookService()
         outlook.create_review_draft(review_payload)
+        review_tracker.mark_completed(repository, pr_number, expected_head_sha)
         completed = True
         logger.info(
             "Webhook review completed for %s PR #%s at head %s",
