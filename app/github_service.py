@@ -13,6 +13,24 @@ class GitHubServiceError(Exception):
         self.detail = detail
 
 
+def _resolve_max_diff_bytes(explicit_value: int | None) -> int:
+    raw_value: int | str = (
+        explicit_value
+        if explicit_value is not None
+        else os.getenv("MAX_PR_DIFF_BYTES", "500000")
+    )
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise GitHubServiceError(
+            503,
+            "MAX_PR_DIFF_BYTES must be a positive integer",
+        ) from exc
+    if value <= 0:
+        raise GitHubServiceError(503, "MAX_PR_DIFF_BYTES must be a positive integer")
+    return value
+
+
 class GitHubService:
     def __init__(
         self,
@@ -23,7 +41,7 @@ class GitHubService:
     ) -> None:
         self.token = token or os.getenv("GITHUB_TOKEN")
         self.base_url = base_url.rstrip("/")
-        self.max_diff_bytes = max_diff_bytes or int(os.getenv("MAX_PR_DIFF_BYTES", "500000"))
+        self.max_diff_bytes = _resolve_max_diff_bytes(max_diff_bytes)
         self.client = client or httpx.Client(timeout=15.0)
         self._owns_client = client is None
 
