@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import tempfile
 from collections import deque
@@ -12,6 +13,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_PULL_REQUEST_ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
 
@@ -41,7 +44,11 @@ class DeliveryTracker:
 
 
 class ReviewTracker:
-    """Suppress duplicate reviews for the same repository, PR and head commit."""
+    """Suppress duplicate reviews for the same repository, PR and head commit.
+
+    In-flight keys are memory-only. Only completed keys are persisted, so a process
+    crash before completion cannot permanently block a later GitHub retry.
+    """
 
     def __init__(
         self,
@@ -51,6 +58,7 @@ class ReviewTracker:
         self.max_entries = max_entries
         self.state_path = state_path
         self._seen: set[str] = set()
+        self._completed: set[str] = set()
         self._order: deque[str] = deque()
         self._lock = Lock()
         self._load()
@@ -67,32 +75,44 @@ class ReviewTracker:
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            entries = data.get("review_keys", []) if isinstance(data, dict) else []
+            entries = data.get("completed_review_keys", []) if isinstance(data, dict) else []
             for item in entries[-self.max_entries :]:
                 if isinstance(item, str) and item not in self._seen:
                     self._seen.add(item)
+                    self._completed.add(item)
                     self._order.append(item)
         except (OSError, json.JSONDecodeError):
             # Idempotency state is recoverable; a corrupt optional cache must not stop startup.
             self._seen.clear()
+            self._completed.clear()
             self._order.clear()
 
     def _persist_locked(self) -> None:
         if not self.state_path:
             return
         path = Path(self.state_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps({"review_keys": list(self._order)})
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            delete=False,
-        ) as temporary:
-            temporary.write(payload)
-            temp_name = temporary.name
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, path)
+        completed_order = [item for item in self._order if item in self._completed]
+        payload = json.dumps({"completed_review_keys": completed_order})
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                delete=False,
+            ) as temporary:
+                temporary.write(payload)
+                temp_name = temporary.name
+            os.chmod(temp_name, 0o600)
+            os.replace(temp_name, path)
+        except OSError:
+            logger.exception("Unable to persist webhook review idempotency state")
+
+    def _trim_locked(self) -> None:
+        while len(self._order) > self.max_entries:
+            oldest = self._order.popleft()
+            self._seen.discard(oldest)
+            self._completed.discard(oldest)
 
     def register(self, repository: str, pr_number: int, head_sha: str) -> bool:
         key = self.key(repository, pr_number, head_sha)
@@ -101,24 +121,33 @@ class ReviewTracker:
                 return False
             self._seen.add(key)
             self._order.append(key)
-            while len(self._order) > self.max_entries:
-                oldest = self._order.popleft()
-                self._seen.discard(oldest)
-            self._persist_locked()
+            self._trim_locked()
             return True
+
+    def mark_completed(self, repository: str, pr_number: int, head_sha: str) -> None:
+        key = self.key(repository, pr_number, head_sha)
+        with self._lock:
+            if key not in self._seen:
+                self._seen.add(key)
+                self._order.append(key)
+                self._trim_locked()
+            self._completed.add(key)
+            self._persist_locked()
 
     def discard(self, repository: str, pr_number: int, head_sha: str) -> None:
         key = self.key(repository, pr_number, head_sha)
         with self._lock:
-            if key not in self._seen:
+            if key not in self._seen and key not in self._completed:
                 return
             self._seen.discard(key)
+            self._completed.discard(key)
             self._order = deque(item for item in self._order if item != key)
             self._persist_locked()
 
     def clear(self) -> None:
         with self._lock:
             self._seen.clear()
+            self._completed.clear()
             self._order.clear()
             self._persist_locked()
 
