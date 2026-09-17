@@ -30,6 +30,8 @@ services:
         sync: false
       - key: GITHUB_TOKEN
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: MICROSOFT_CLIENT_ID
         sync: false
       - key: MICROSOFT_CLIENT_SECRET
@@ -38,7 +40,6 @@ services:
         sync: false
       - key: OUTLOOK_REVIEW_RECIPIENT
         sync: false
-      # Optional. Set this to a path on a persistent disk in production,
-      # for example /var/data/review_state.json.
+      # Optional local fallback when DATABASE_URL is not configured.
       - key: REVIEW_STATE_PATH
         sync: false
