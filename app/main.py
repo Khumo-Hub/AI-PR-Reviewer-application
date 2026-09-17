@@ -10,7 +10,7 @@ from app.ai_reviewer import AIReviewService, AIReviewerError
 from app.github_service import GitHubService, GitHubServiceError
 from app.microsoft_auth import MicrosoftAuthError, MicrosoftAuthService
 from app.outlook_service import OutlookService, OutlookServiceError
-from app.ui import portfolio_page
+from app.ui_v2 import portfolio_page
 from app.webhook_service import (
     SUPPORTED_PULL_REQUEST_ACTIONS,
     parse_webhook_payload,
@@ -161,9 +161,9 @@ def run_review_and_create_draft(
             outlook.close()
 
 
-@app.get("/")
-def root() -> dict[str, str]:
-    return {"message": "AI PR Reviewer is running"}
+@app.get("/", include_in_schema=False)
+def root():
+    return portfolio_page()
 
 
 @app.get("/app", include_in_schema=False)
