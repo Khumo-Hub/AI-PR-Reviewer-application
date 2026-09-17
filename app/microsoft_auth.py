@@ -8,6 +8,8 @@ from typing import Any
 
 import msal
 
+from app.persistence import StateStore, StateStoreError, build_state_store
+
 
 class MicrosoftAuthError(Exception):
     def __init__(self, status_code: int, detail: str) -> None:
@@ -17,6 +19,7 @@ class MicrosoftAuthError(Exception):
 
 
 _cache_lock = threading.Lock()
+_MICROSOFT_CACHE_KEY = "microsoft_msal_token_cache"
 
 
 class MicrosoftAuthService:
@@ -31,12 +34,17 @@ class MicrosoftAuthService:
         cache_path: str | None = None,
         application: Any | None = None,
         cache: Any | None = None,
+        state_store: StateStore | None = None,
     ) -> None:
         self.redirect_uri = redirect_uri or os.getenv("MICROSOFT_REDIRECT_URI")
         self.cache_path = cache_path or os.getenv(
             "MICROSOFT_TOKEN_CACHE_PATH",
             ".data/msal_token_cache.json",
         )
+        try:
+            self.state_store = state_store if state_store is not None else build_state_store()
+        except StateStoreError as exc:
+            raise MicrosoftAuthError(503, "Unable to initialize Microsoft token persistence") from exc
 
         if application is not None:
             self.application = application
@@ -65,7 +73,22 @@ class MicrosoftAuthService:
         )
 
     def _load_cache(self) -> None:
-        if self.cache is None or not self.cache_path:
+        if self.cache is None:
+            return
+
+        if self.state_store is not None:
+            try:
+                serialized = self.state_store.get(_MICROSOFT_CACHE_KEY)
+            except StateStoreError as exc:
+                raise MicrosoftAuthError(503, "Unable to load Microsoft token cache") from exc
+            if serialized:
+                try:
+                    self.cache.deserialize(serialized)
+                except ValueError as exc:
+                    raise MicrosoftAuthError(503, "Unable to load Microsoft token cache") from exc
+            return
+
+        if not self.cache_path:
             return
         path = Path(self.cache_path)
         if not path.exists():
@@ -78,13 +101,24 @@ class MicrosoftAuthService:
             raise MicrosoftAuthError(503, "Unable to load Microsoft token cache") from exc
 
     def _persist_cache(self) -> None:
-        if self.cache is None or not self.cache_path or not hasattr(self.cache, "serialize"):
+        if self.cache is None or not hasattr(self.cache, "serialize"):
+            return
+
+        serialized = self.cache.serialize()
+        if self.state_store is not None:
+            try:
+                with _cache_lock:
+                    self.state_store.set(_MICROSOFT_CACHE_KEY, serialized)
+            except StateStoreError as exc:
+                raise MicrosoftAuthError(503, "Unable to persist Microsoft token cache") from exc
+            return
+
+        if not self.cache_path:
             return
         path = Path(self.cache_path)
         try:
             with _cache_lock:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                serialized = self.cache.serialize()
                 with tempfile.NamedTemporaryFile(
                     mode="w",
                     encoding="utf-8",
