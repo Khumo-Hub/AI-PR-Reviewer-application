@@ -10,7 +10,9 @@ client = TestClient(app)
 def test_root() -> None:
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json() == {"message": "AI PR Reviewer is running"}
+    assert "AI PR Reviewer" in response.text
+    assert "Review a pull request" in response.text
+    assert "Try example PR" in response.text
 
 
 def test_health_check() -> None:
