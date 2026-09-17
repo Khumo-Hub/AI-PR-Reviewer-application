@@ -108,6 +108,35 @@ def run_review_and_create_draft(
     ai = None
     outlook = None
     completed = False
+    heartbeat_stop = threading.Event()
+    claim_lost = threading.Event()
+
+    def heartbeat() -> None:
+        interval = max(30, min(300, review_tracker.claim_lease_seconds // 3))
+        while not heartbeat_stop.wait(interval):
+            try:
+                if not review_tracker.renew(repository, pr_number, expected_head_sha):
+                    claim_lost.set()
+                    logger.error(
+                        "Review claim was lost for %s PR #%s at head %s",
+                        repository,
+                        pr_number,
+                        expected_head_sha,
+                    )
+                    return
+            except StateStoreError:
+                claim_lost.set()
+                logger.exception(
+                    "Unable to renew review claim for %s PR #%s at head %s",
+                    repository,
+                    pr_number,
+                    expected_head_sha,
+                )
+                return
+
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    heartbeat_thread.start()
+
     try:
         github = GitHubService()
         review_input = github.get_pull_request_review_input(repository, pr_number)
@@ -125,8 +154,19 @@ def run_review_and_create_draft(
         ai = AIReviewService()
         review = ai.review_pull_request(review_input)
         review_payload = build_review_payload(repository, review_input, review)
+
+        if claim_lost.is_set() or not review_tracker.renew(
+            repository,
+            pr_number,
+            expected_head_sha,
+        ):
+            raise StateStoreError("Review claim was lost before Outlook draft creation")
+
         outlook = OutlookService()
         outlook.create_review_draft(review_payload)
+
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
         review_tracker.mark_completed(repository, pr_number, expected_head_sha)
         completed = True
         logger.info(
@@ -159,6 +199,8 @@ def run_review_and_create_draft(
             expected_head_sha,
         )
     finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
         if not completed:
             try:
                 review_tracker.discard(repository, pr_number, expected_head_sha)
