@@ -10,6 +10,7 @@ from app.ai_reviewer import AIReviewService, AIReviewerError
 from app.github_service import GitHubService, GitHubServiceError
 from app.microsoft_auth import MicrosoftAuthError, MicrosoftAuthService
 from app.outlook_service import OutlookService, OutlookServiceError
+from app.persistence import StateStoreError
 from app.webhook_service import (
     SUPPORTED_PULL_REQUEST_ACTIONS,
     parse_webhook_payload,
@@ -142,6 +143,14 @@ def run_review_and_create_draft(
             expected_head_sha,
             exc,
         )
+    except StateStoreError as exc:
+        logger.error(
+            "Webhook persistence failed for %s PR #%s at head %s: %s",
+            repository,
+            pr_number,
+            expected_head_sha,
+            exc,
+        )
     except Exception:
         logger.exception(
             "Unexpected webhook review failure for %s PR #%s at head %s",
@@ -151,7 +160,15 @@ def run_review_and_create_draft(
         )
     finally:
         if not completed:
-            review_tracker.discard(repository, pr_number, expected_head_sha)
+            try:
+                review_tracker.discard(repository, pr_number, expected_head_sha)
+            except StateStoreError:
+                logger.exception(
+                    "Unable to release review claim for %s PR #%s at head %s",
+                    repository,
+                    pr_number,
+                    expected_head_sha,
+                )
         if github is not None:
             github.close()
         if ai is not None:
@@ -349,7 +366,15 @@ async def github_webhook(
     if is_draft:
         return {"status": "draft_ignored"}
 
-    if not review_tracker.register(repository, pr_number, head_sha):
+    try:
+        claimed = review_tracker.register(repository, pr_number, head_sha)
+    except StateStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Review persistence is temporarily unavailable",
+        ) from exc
+
+    if not claimed:
         return {"status": "review_already_scheduled"}
 
     background_tasks.add_task(
