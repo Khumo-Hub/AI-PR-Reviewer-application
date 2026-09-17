@@ -13,10 +13,13 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from app.persistence import StateStore, StateStoreError, build_state_store
+
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_PULL_REQUEST_ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
+_REVIEW_STATE_KEY = "completed_review_keys"
 
 
 class DeliveryTracker:
@@ -46,17 +49,19 @@ class DeliveryTracker:
 class ReviewTracker:
     """Suppress duplicate reviews for the same repository, PR and head commit.
 
-    In-flight keys are memory-only. Only completed keys are persisted, so a process
-    crash before completion cannot permanently block a later GitHub retry.
+    In-flight keys are memory-only. Completed keys can be persisted in Postgres
+    when DATABASE_URL is configured, or to the existing optional JSON file.
     """
 
     def __init__(
         self,
         max_entries: int = 1000,
         state_path: str | None = None,
+        state_store: StateStore | None = None,
     ) -> None:
         self.max_entries = max_entries
         self.state_path = state_path
+        self.state_store = state_store
         self._seen: set[str] = set()
         self._completed: set[str] = set()
         self._order: deque[str] = deque()
@@ -67,7 +72,27 @@ class ReviewTracker:
     def key(repository: str, pr_number: int, head_sha: str) -> str:
         return f"{repository.lower()}:{pr_number}:{head_sha.lower()}"
 
+    def _restore_entries(self, entries: list[Any]) -> None:
+        for item in entries[-self.max_entries :]:
+            if isinstance(item, str) and item not in self._seen:
+                self._seen.add(item)
+                self._completed.add(item)
+                self._order.append(item)
+
     def _load(self) -> None:
+        if self.state_store is not None:
+            try:
+                serialized = self.state_store.get(_REVIEW_STATE_KEY)
+                if not serialized:
+                    return
+                data = json.loads(serialized)
+                entries = data.get("completed_review_keys", []) if isinstance(data, dict) else []
+                self._restore_entries(entries)
+                return
+            except (StateStoreError, json.JSONDecodeError):
+                logger.exception("Unable to load database-backed review idempotency state")
+                return
+
         if not self.state_path:
             return
         path = Path(self.state_path)
@@ -76,11 +101,7 @@ class ReviewTracker:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             entries = data.get("completed_review_keys", []) if isinstance(data, dict) else []
-            for item in entries[-self.max_entries :]:
-                if isinstance(item, str) and item not in self._seen:
-                    self._seen.add(item)
-                    self._completed.add(item)
-                    self._order.append(item)
+            self._restore_entries(entries)
         except (OSError, json.JSONDecodeError):
             # Idempotency state is recoverable; a corrupt optional cache must not stop startup.
             self._seen.clear()
@@ -88,11 +109,19 @@ class ReviewTracker:
             self._order.clear()
 
     def _persist_locked(self) -> None:
+        completed_order = [item for item in self._order if item in self._completed]
+        payload = json.dumps({"completed_review_keys": completed_order})
+
+        if self.state_store is not None:
+            try:
+                self.state_store.set(_REVIEW_STATE_KEY, payload)
+            except StateStoreError:
+                logger.exception("Unable to persist database-backed review idempotency state")
+            return
+
         if not self.state_path:
             return
         path = Path(self.state_path)
-        completed_order = [item for item in self._order if item in self._completed]
-        payload = json.dumps({"completed_review_keys": completed_order})
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
@@ -153,7 +182,10 @@ class ReviewTracker:
 
 
 tracker = DeliveryTracker()
-review_tracker = ReviewTracker(state_path=os.getenv("REVIEW_STATE_PATH"))
+review_tracker = ReviewTracker(
+    state_path=os.getenv("REVIEW_STATE_PATH"),
+    state_store=build_state_store(),
+)
 
 
 def verify_github_signature(body: bytes, signature: str | None) -> None:
