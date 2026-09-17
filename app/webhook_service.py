@@ -20,8 +20,7 @@ from app.persistence import StateStore, StateStoreError, build_state_store
 logger = logging.getLogger(__name__)
 
 SUPPORTED_PULL_REQUEST_ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
-_REVIEW_STATE_KEY = "completed_review_keys"
-_DEFAULT_REVIEW_CLAIM_LEASE_SECONDS = 900
+_DEFAULT_REVIEW_CLAIM_LEASE_SECONDS = 3600
 
 
 class DeliveryTracker:
@@ -51,11 +50,9 @@ class DeliveryTracker:
 class ReviewTracker:
     """Suppress duplicate reviews for the same repository, PR and head commit.
 
-    When Postgres is configured, register() acquires an atomic database claim so
-    separate app processes cannot schedule the same review concurrently. The
-    claim is marked completed only after the Outlook draft is created. Failures
-    release the claim for retry. Without Postgres, the previous file/memory
-    behavior remains available for local development.
+    In Postgres mode claims are atomic across processes and leased. The active
+    worker periodically renews its lease, verifies ownership before external
+    side effects, and completed claims are pruned to max_entries.
     """
 
     def __init__(
@@ -133,14 +130,9 @@ class ReviewTracker:
 
     def register(self, repository: str, pr_number: int, head_sha: str) -> bool:
         key = self.key(repository, pr_number, head_sha)
-
         if self.state_store is not None:
             claim_token = uuid.uuid4().hex
-            claimed = self.state_store.claim_review(
-                key,
-                claim_token,
-                self.claim_lease_seconds,
-            )
+            claimed = self.state_store.claim_review(key, claim_token, self.claim_lease_seconds)
             if claimed:
                 with self._lock:
                     self._claim_tokens[key] = claim_token
@@ -154,9 +146,18 @@ class ReviewTracker:
             self._trim_locked()
             return True
 
+    def renew(self, repository: str, pr_number: int, head_sha: str) -> bool:
+        if self.state_store is None:
+            return True
+        key = self.key(repository, pr_number, head_sha)
+        with self._lock:
+            claim_token = self._claim_tokens.get(key)
+        if not claim_token:
+            return False
+        return self.state_store.renew_review(key, claim_token, self.claim_lease_seconds)
+
     def mark_completed(self, repository: str, pr_number: int, head_sha: str) -> None:
         key = self.key(repository, pr_number, head_sha)
-
         if self.state_store is not None:
             with self._lock:
                 claim_token = self._claim_tokens.get(key)
@@ -164,6 +165,7 @@ class ReviewTracker:
                 raise StateStoreError("Review claim token is missing")
             if not self.state_store.complete_review(key, claim_token):
                 raise StateStoreError("Unable to complete the active review claim")
+            self.state_store.prune_completed_reviews(self.max_entries)
             with self._lock:
                 self._claim_tokens.pop(key, None)
             return
@@ -178,7 +180,6 @@ class ReviewTracker:
 
     def discard(self, repository: str, pr_number: int, head_sha: str) -> None:
         key = self.key(repository, pr_number, head_sha)
-
         if self.state_store is not None:
             with self._lock:
                 claim_token = self._claim_tokens.get(key)
