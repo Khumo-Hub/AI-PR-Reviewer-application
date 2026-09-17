@@ -39,6 +39,32 @@ class FakeApplication:
         return self.complete_result
 
 
+class FakeCache:
+    def __init__(self, serialized: str = "cache-v1") -> None:
+        self.serialized = serialized
+        self.loaded = None
+
+    def serialize(self) -> str:
+        return self.serialized
+
+    def deserialize(self, value: str) -> None:
+        self.loaded = value
+
+
+class MemoryStateStore:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+    def delete(self, key: str) -> None:
+        self.values.pop(key, None)
+
+
 def test_silent_token_uses_delegated_mail_scope() -> None:
     application = FakeApplication()
     auth = MicrosoftAuthService(application=application)
@@ -105,3 +131,24 @@ def test_connection_status_reports_account() -> None:
         "connected": True,
         "account": "reviewer@example.com",
     }
+
+
+def test_token_cache_can_be_persisted_and_reloaded_from_state_store() -> None:
+    store = MemoryStateStore()
+    first_cache = FakeCache("serialized-token-cache")
+    first = MicrosoftAuthService(
+        application=FakeApplication(),
+        cache=first_cache,
+        state_store=store,
+    )
+    first._persist_cache()
+
+    second_cache = FakeCache()
+    second = MicrosoftAuthService(
+        application=FakeApplication(),
+        cache=second_cache,
+        state_store=store,
+    )
+    second._load_cache()
+
+    assert second_cache.loaded == "serialized-token-cache"
