@@ -15,6 +15,8 @@ class FakeAtomicStore:
     def __init__(self) -> None:
         self.claims: dict[str, tuple[str, str]] = {}
         self.fail_claim = False
+        self.fail_renew = False
+        self.prune_calls: list[int] = []
 
     def get(self, key: str):
         return None
@@ -33,6 +35,11 @@ class FakeAtomicStore:
         self.claims[key] = ("in_progress", claim_token)
         return True
 
+    def renew_review(self, key: str, claim_token: str, lease_seconds: int) -> bool:
+        if self.fail_renew:
+            raise StateStoreError("database unavailable")
+        return self.claims.get(key) == ("in_progress", claim_token)
+
     def complete_review(self, key: str, claim_token: str) -> bool:
         current = self.claims.get(key)
         if current != ("in_progress", claim_token):
@@ -47,6 +54,14 @@ class FakeAtomicStore:
         del self.claims[key]
         return True
 
+    def prune_completed_reviews(self, max_entries: int) -> None:
+        self.prune_calls.append(max_entries)
+        completed = [
+            key for key, (status, _) in self.claims.items() if status == "completed"
+        ]
+        for key in completed[:-max_entries]:
+            del self.claims[key]
+
     def clear_reviews(self) -> None:
         self.claims.clear()
 
@@ -60,13 +75,33 @@ def test_two_tracker_instances_cannot_claim_same_review() -> None:
     assert second.register("owner/repo", 7, "abc123") is False
 
 
-def test_completed_database_claim_stays_deduplicated() -> None:
+def test_active_claim_can_be_renewed() -> None:
     store = FakeAtomicStore()
-    first = ReviewTracker(state_store=store)
-    second = ReviewTracker(state_store=store)
+    tracker_instance = ReviewTracker(state_store=store)
+
+    assert tracker_instance.register("owner/repo", 7, "abc123") is True
+    assert tracker_instance.renew("owner/repo", 7, "abc123") is True
+
+
+def test_lost_claim_is_detected_before_external_work() -> None:
+    store = FakeAtomicStore()
+    tracker_instance = ReviewTracker(state_store=store)
+
+    assert tracker_instance.register("owner/repo", 7, "abc123") is True
+    key = ReviewTracker.key("owner/repo", 7, "abc123")
+    store.claims[key] = ("in_progress", "other-worker-token")
+
+    assert tracker_instance.renew("owner/repo", 7, "abc123") is False
+
+
+def test_completed_database_claim_stays_deduplicated_and_is_pruned() -> None:
+    store = FakeAtomicStore()
+    first = ReviewTracker(state_store=store, max_entries=3)
+    second = ReviewTracker(state_store=store, max_entries=3)
 
     assert first.register("owner/repo", 7, "abc123") is True
     first.mark_completed("owner/repo", 7, "abc123")
+    assert store.prune_calls == [3]
     assert second.register("owner/repo", 7, "abc123") is False
 
 
