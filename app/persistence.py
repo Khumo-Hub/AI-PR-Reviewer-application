@@ -27,6 +27,9 @@ class StateStore(Protocol):
     def renew_review(self, key: str, claim_token: str, lease_seconds: int) -> bool:
         ...
 
+    def prepare_review_side_effect(self, key: str, claim_token: str) -> bool:
+        ...
+
     def complete_review(self, key: str, claim_token: str) -> bool:
         ...
 
@@ -47,6 +50,12 @@ class PostgresStateStore:
     import/startup time. Tables are initialized on the first persistence
     operation, allowing the web process to start even during a transient
     database outage and fail individual persistence-dependent requests with 503.
+
+    Review claims use a three-state lifecycle:
+    in_progress -> side_effect_pending -> completed.
+    A side_effect_pending row cannot be reclaimed automatically. This prevents
+    replaying an Outlook draft when an external side effect may have succeeded
+    but final completion persistence is uncertain.
     """
 
     def __init__(self, database_url: str) -> None:
@@ -62,6 +71,8 @@ class PostgresStateStore:
                 self.database_url,
                 autocommit=True,
                 connect_timeout=5,
+                tcp_user_timeout=5000,
+                options="-c statement_timeout=5000 -c lock_timeout=5000",
             )
         except Exception as exc:
             raise StateStoreError("Unable to connect to persistence database") from exc
@@ -91,10 +102,18 @@ class PostgresStateStore:
                                 status TEXT NOT NULL,
                                 claim_token TEXT NOT NULL,
                                 lease_expires_at TIMESTAMPTZ,
-                                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                                CONSTRAINT review_claims_status_check
-                                    CHECK (status IN ('in_progress', 'completed'))
+                                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                             )
+                            """
+                        )
+                        cursor.execute(
+                            "ALTER TABLE review_claims DROP CONSTRAINT IF EXISTS review_claims_status_check"
+                        )
+                        cursor.execute(
+                            """
+                            ALTER TABLE review_claims
+                            ADD CONSTRAINT review_claims_status_check
+                            CHECK (status IN ('in_progress', 'side_effect_pending', 'completed'))
                             """
                         )
                 self._initialized = True
@@ -170,11 +189,8 @@ class PostgresStateStore:
                             claim_token = EXCLUDED.claim_token,
                             lease_expires_at = EXCLUDED.lease_expires_at,
                             updated_at = NOW()
-                        WHERE review_claims.status <> 'completed'
-                          AND (
-                              review_claims.lease_expires_at IS NULL
-                              OR review_claims.lease_expires_at <= NOW()
-                          )
+                        WHERE review_claims.status = 'in_progress'
+                          AND review_claims.lease_expires_at <= NOW()
                         RETURNING key
                         """,
                         (key, claim_token, lease_seconds),
@@ -211,6 +227,31 @@ class PostgresStateStore:
         except Exception as exc:
             raise StateStoreError("Unable to renew review claim") from exc
 
+    def prepare_review_side_effect(self, key: str, claim_token: str) -> bool:
+        self._ensure_tables()
+        try:
+            with self._connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE review_claims
+                        SET status = 'side_effect_pending',
+                            lease_expires_at = NULL,
+                            updated_at = NOW()
+                        WHERE key = %s
+                          AND claim_token = %s
+                          AND status = 'in_progress'
+                          AND lease_expires_at > NOW()
+                        RETURNING key
+                        """,
+                        (key, claim_token),
+                    )
+                    return cursor.fetchone() is not None
+        except StateStoreError:
+            raise
+        except Exception as exc:
+            raise StateStoreError("Unable to prepare review side effect") from exc
+
     def complete_review(self, key: str, claim_token: str) -> bool:
         self._ensure_tables()
         try:
@@ -224,8 +265,7 @@ class PostgresStateStore:
                             updated_at = NOW()
                         WHERE key = %s
                           AND claim_token = %s
-                          AND status = 'in_progress'
-                          AND lease_expires_at > NOW()
+                          AND status = 'side_effect_pending'
                         RETURNING key
                         """,
                         (key, claim_token),
